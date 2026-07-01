@@ -359,71 +359,6 @@ def fetch_indicator(ticker):
         return None
 
 
-@st.cache_data(show_spinner=False, ttl=1800)
-def get_investor_trading(code):
-    """기관·외국인·개인 매수/매도/순매수 수량(최근 약 5거래일 누적).
-    반환: (DataFrame, 소스라벨). 실패 시 (None, None)."""
-    try:
-        from pykrx import stock
-        today = datetime.date.today()
-        frm = (today - datetime.timedelta(days=12)).strftime("%Y%m%d")
-        to = today.strftime("%Y%m%d")
-        df = stock.get_market_trading_volume_by_investor(frm, to, code)
-        if df is not None and len(df):
-            mapping = [("기관", ["기관합계"]), ("외국인", ["외국인합계", "외국인"]), ("개인", ["개인"])]
-            rows = {}
-            for label, keys in mapping:
-                for k in keys:
-                    if k in df.index:
-                        r = df.loc[k]
-                        rows[label] = {"매수": to_num(r.get("매수")),
-                                       "매도": to_num(r.get("매도")),
-                                       "순매수": to_num(r.get("순매수"))}
-                        break
-            if rows:
-                out = pd.DataFrame(rows).T
-                order = [x for x in ["기관", "외국인", "개인"] if x in out.index]
-                return out.reindex(order)[["매수", "매도", "순매수"]], "KRX 기준 (매수·매도·순매수)"
-    except Exception:
-        pass
-    # 대체: 네이버 (기관·외국인 순매매만)
-    return get_investor_trading_naver(code), "네이버 기준 (순매매만 · 개인 제외)"
-
-
-@st.cache_data(show_spinner=False, ttl=1800)
-def get_investor_trading_naver(code):
-    """네이버 금융 외국인·기관 순매매(최근 5거래일 누적). 실패 시 None."""
-    url = f"https://finance.naver.com/item/frgn.naver?code={code}"
-    headers = {"User-Agent": "Mozilla/5.0",
-               "Referer": f"https://finance.naver.com/item/main.naver?code={code}"}
-    try:
-        r = requests.get(url, headers=headers, timeout=10)
-        r.encoding = "euc-kr"
-        tables = pd.read_html(io.StringIO(r.text))
-    except Exception:
-        return None
-
-    def label(col):
-        return " ".join(str(x) for x in col) if isinstance(col, tuple) else str(col)
-
-    for t in tables:
-        cols = list(t.columns)
-        inst_c = next((c for c in cols if "기관" in label(c) and "순매매" in label(c)), None)
-        frgn_c = next((c for c in cols if "외국인" in label(c) and "순매매" in label(c)), None)
-        if inst_c is None or frgn_c is None:
-            continue
-        try:
-            inst = t[inst_c].map(to_num).dropna()
-            frgn = t[frgn_c].map(to_num).dropna()
-        except Exception:
-            continue
-        if len(inst) == 0 and len(frgn) == 0:
-            continue
-        return pd.DataFrame({"순매수": {"기관": inst.head(5).sum(),
-                                     "외국인": frgn.head(5).sum()}})[["순매수"]]
-    return None
-
-
 def render_reports(name, code):
     """기업명·종목코드 기준 증권사 리포트·리서치 바로가기."""
     q = urllib.parse.quote(name)
@@ -437,20 +372,64 @@ def render_reports(name, code):
     st.caption("증권사 애널리스트 리포트·목표주가·리서치를 위 링크에서 바로 확인할 수 있어요.")
 
 
+@st.cache_data(show_spinner=False, ttl=1800)
+def get_investor_table_naver(code, rows=20):
+    """네이버 '외국인·기관 순매매 거래량' 표를 그대로 가져옴. 실패 시 None."""
+    url = f"https://finance.naver.com/item/frgn.naver?code={code}"
+    try:
+        r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
+        r.encoding = "euc-kr"
+        tables = pd.read_html(io.StringIO(r.text))
+    except Exception:
+        return None
+
+    def flat(col):
+        if isinstance(col, tuple):
+            seen = []
+            for p in col:
+                s = str(p).strip()
+                if s and "Unnamed" not in s and s not in seen:
+                    seen.append(s)
+            return " ".join(seen)
+        return str(col).strip()
+
+    for t in tables:
+        cols = [flat(c) for c in t.columns]
+        if any("날짜" in c for c in cols) and any("거래량" in c for c in cols):
+            df = t.copy()
+            df.columns = cols
+
+            def find(key):
+                return next((c for c in cols if key in c), None)
+
+            wanted = [("날짜", "날짜"), ("종가", "종가"), ("전일비", "전일비"),
+                      ("등락률", "등락률"), ("거래량", "거래량"),
+                      ("기관", "기관 순매매량"), ("외국인 순매매량", "외국인 순매매량"),
+                      ("보유주수", "외국인 보유주수"), ("보유율", "외국인 보유율")]
+            rename = {}
+            for key, newname in wanted:
+                c = find(key)
+                if c and c not in rename:
+                    rename[c] = newname
+            if "날짜" not in rename.values():
+                return None
+            df = df[list(rename.keys())].rename(columns=rename)
+            date_col = "날짜"
+            df = df[df[date_col].notna()].dropna(how="all").head(rows).reset_index(drop=True)
+            return df if len(df) else None
+    return None
+
+
 def render_investor(code, name):
-    st.markdown("#### 📦 투자자 수급 (기관 · 외국인 · 개인)")
-    inv, source = get_investor_trading(code)
-    if inv is not None and not inv.empty:
-        st.caption(f"데이터 출처: {source} · 최근 약 5거래일 누적 · 단위: 주")
-        fmt = {c: "{:,.0f}" for c in inv.columns}
-        st.dataframe(inv.style.format(fmt), use_container_width=True)
-        if "매수" in inv.columns:
-            st.caption("순매수 = 매수 − 매도. 양수면 순매수(사들임), 음수면 순매도(팔아냄).")
+    st.markdown("#### 📦 외국인 · 기관 순매매 · 거래량")
+    df = get_investor_table_naver(code)
+    if df is not None and not df.empty:
+        st.caption("최근 거래일 순 · 순매매량 단위: 주 (양수=순매수, 음수=순매도) · 출처: 네이버 금융")
+        st.dataframe(df, use_container_width=True, hide_index=True)
     else:
-        st.caption("클라우드에서는 KRX가 서버 접근을 막아 기관·외국인·개인 매매 수치를 "
-                   "직접 불러오기 어려워요. 아래 링크에서 바로 확인할 수 있어요.")
+        st.caption("표 데이터를 불러오지 못했어요. 아래 링크에서 바로 확인할 수 있어요.")
     naver = f"https://finance.naver.com/item/frgn.naver?code={code}"
-    st.markdown(f"🔗 [네이버 금융에서 '{name}' 외국인·기관 매매동향 보기]({naver})")
+    st.markdown(f"🔗 [네이버 금융에서 '{name}' 매매동향 원본 보기]({naver})")
 
 
 def render_market():
@@ -592,8 +571,9 @@ def tab_technical(result, focus):
                       margin=dict(l=0, r=0, t=10, b=0), legend=dict(orientation="h"),
                       showlegend=True)
     fig.update_yaxes(tickformat=",", ticksuffix="원", hoverformat=",.0f",
-                     automargin=True, row=1, col=1)
-    fig.update_yaxes(tickformat=",", ticksuffix="주", automargin=True, row=2, col=1)
+                     automargin=True, rangemode="nonnegative", row=1, col=1)
+    fig.update_yaxes(tickformat=",", ticksuffix="주", automargin=True,
+                     rangemode="tozero", row=2, col=1)
     st.plotly_chart(
         fig,
         use_container_width=True,
