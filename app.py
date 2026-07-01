@@ -7,6 +7,8 @@ app.py — KOSPI 종목 분석 애플리케이션 (Streamlit)
 import os
 import re
 import datetime
+import urllib.parse
+import xml.etree.ElementTree as ET
 import requests
 import pandas as pd
 import streamlit as st
@@ -141,19 +143,20 @@ def get_naver_industry_map():
 
 
 @st.cache_data(show_spinner=False)
-def get_stock_news(code, n=8):
-    url = f"https://finance.naver.com/item/news_news.naver?code={code}&page=1"
+@st.cache_data(show_spinner=False)
+def get_news(name, n=8):
+    """구글 뉴스 RSS에서 검색어가 포함된 최근 기사 (제목, 링크). 실패 시 []."""
+    q = urllib.parse.quote(name)
+    url = f"https://news.google.com/rss/search?q={q}&hl=ko&gl=KR&ceid=KR:ko"
     try:
         r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
-        r.encoding = "euc-kr"
-        items = re.findall(r'<a href="(/item/news_read\.naver[^"]+)"[^>]*>(.*?)</a>', r.text, re.S)
-        out, seen = [], set()
-        for href, title in items:
-            title = re.sub(r"<[^>]+>", "", title).strip()
-            if not title or title in seen:
-                continue
-            seen.add(title)
-            out.append((title, "https://finance.naver.com" + href.replace("&amp;", "&")))
+        root = ET.fromstring(r.content)
+        out = []
+        for item in root.iter("item"):
+            title = (item.findtext("title") or "").strip()
+            link = (item.findtext("link") or "").strip()
+            if title and link:
+                out.append((title, link))
             if len(out) >= n:
                 break
         return out
@@ -325,12 +328,28 @@ def price_compare_table(df):
 
 
 # ---------- 탭 렌더 ----------
-def tab_summary(result, focus):
-    name = focus if focus in result.index else result.index[0]
+def render_news(name):
+    """기업명 기준 네이버·구글 뉴스 바로가기 + 구글 뉴스 헤드라인."""
+    q = urllib.parse.quote(name)
+    naver = "https://search.naver.com/search.naver?where=news&query=" + q
+    google = "https://news.google.com/search?q=" + q + "&hl=ko&gl=KR&ceid=KR:ko"
+    st.markdown(f"🔎 [네이버 뉴스에서 '{name}' 보기]({naver})  ·  [구글 뉴스에서 '{name}' 보기]({google})")
+    news = get_news(name)
+    if news:
+        for title, link in news:
+            st.markdown(f"- [{title}]({link})")
+    else:
+        st.caption("헤드라인을 불러오지 못했어요. 위 검색 링크로 바로 확인할 수 있어요.")
+
+
+def tab_summary(result, focus, sector=None):
+    names = result.index.tolist()
+    idx = names.index(focus) if focus in names else 0
+    name = st.selectbox("요약할 종목 선택", names, index=idx, key="summary_pick")
     r = result.loc[name]
     rank = result.index.get_loc(name) + 1
     st.subheader(f"📋 {name} — 분석 요약")
-    st.caption(f"같은 업종 {len(result)}종목 중 **매력도 {rank}위**")
+    st.caption(f"같은 그룹 {len(result)}종목 중 **매력도 {rank}위**")
     a, b, c, d = st.columns(4)
     a.metric("매력도", f"{r['매력도']:.1f}")
     b.metric("안정성", f"{r['안정성']:.1f}")
@@ -341,13 +360,11 @@ def tab_summary(result, focus):
     f2.metric("PER", f"{r['PER']:.1f}" if pd.notna(r["PER"]) else "-")
     g.metric("PBR", f"{r['PBR']:.1f}" if pd.notna(r["PBR"]) else "-")
     h.metric("ROE", f"{r['ROE']:.1f}%" if pd.notna(r["ROE"]) else "-")
-    st.markdown("#### 📰 최근 뉴스·이슈")
-    news = get_stock_news(r["코드"])
-    if news:
-        for title, link in news:
-            st.markdown(f"- [{title}]({link})")
-    else:
-        st.caption("뉴스를 불러오지 못했어요. 잠시 후 다시 시도해 주세요.")
+    st.markdown(f"#### 📰 '{name}' 기업 뉴스·이슈")
+    render_news(name)
+    if sector:
+        st.markdown(f"#### 🏭 '{sector}' 업종 뉴스·이슈")
+        render_news(f"{sector} 업종")
 
 
 def tab_fundamental(result, sub, label):
@@ -441,12 +458,15 @@ def tab_technical(result, focus):
     st.caption(f"RSI ({tf} 기준 · 70 위 과매수 · 30 아래 과매도)")
     st.line_chart(o[["RSI"]])
 
+    st.markdown("#### 📰 뉴스·이슈")
+    render_news(pick)
 
-def render_detail(result, sub, label, focus=None, show_summary=False):
+
+def render_detail(result, sub, label, focus=None, show_summary=False, sector=None):
     if show_summary:
         t0, t1, t2 = st.tabs(["📋 분석 요약", "📑 1차 · 기본적 분석", "📈 2차 · 기술적 분석"])
         with t0:
-            tab_summary(result, focus or result.index[0])
+            tab_summary(result, focus or result.index[0], sector=sector)
         with t1:
             tab_fundamental(result, sub, label)
         with t2:
@@ -499,7 +519,7 @@ w_v = st.sidebar.slider("밸류에이션", 0, 100, 30)
 max_n = st.sidebar.slider("분석 종목 수 (업종 내 시총 상위)", 5, 60, 20)
 
 
-def run_group(stocks, label, focus=None, show_summary=False):
+def run_group(stocks, label, focus=None, show_summary=False, sector=None):
     prog = st.progress(0.0, text="재무 데이터 수집 중...")
     metrics = build_metrics(stocks, int(year), reprt_code, api_key, marcap_map, price_map, prog)
     prog.empty()
@@ -507,7 +527,7 @@ def run_group(stocks, label, focus=None, show_summary=False):
         st.error("데이터를 가져오지 못했습니다. 재무 기준(분기)을 바꾸거나 API 키를 확인하세요.")
         st.stop()
     result, sub = score_and_rank(metrics, w_s, w_p, w_v)
-    render_detail(result, sub, label, focus=focus, show_summary=show_summary)
+    render_detail(result, sub, label, focus=focus, show_summary=show_summary, sector=sector)
 
 
 if not valid_sectors:
@@ -519,7 +539,8 @@ if mode == "단일 업종 상세":
     default_idx = valid_sectors.index("전기전자") if "전기전자" in valid_sectors else 0
     sector = st.sidebar.selectbox("업종 선택", valid_sectors, index=default_idx)
     sub_list = listing[listing["업종"] == sector].sort_values("시가총액", ascending=False).head(max_n)
-    run_group(dict(zip(sub_list["코드"], sub_list["이름"])), f"'{sector}' 업종 매력도 순위")
+    run_group(dict(zip(sub_list["코드"], sub_list["이름"])), f"'{sector}' 업종 매력도 순위",
+              show_summary=True, sector=sector)
 
 elif mode == "종목 검색":
     names_all = listing.sort_values("시가총액", ascending=False)["이름"].tolist()
@@ -530,7 +551,7 @@ elif mode == "종목 검색":
     grp = listing[listing["업종"] == qsector].sort_values("시가총액", ascending=False).head(max_n)
     stocks = dict(zip(grp["코드"], grp["이름"]))
     stocks[qcode] = q
-    run_group(stocks, f"'{qsector}' 업종 내 분석", focus=q, show_summary=True)
+    run_group(stocks, f"'{qsector}' 업종 내 분석", focus=q, show_summary=True, sector=qsector)
 
 else:  # 전체 업종 요약
     k = st.sidebar.slider("업종별 분석 종목 수", 3, 15, 5)
@@ -565,6 +586,6 @@ else:  # 전체 업종 요약
     st.markdown("---")
     sec_pick = st.selectbox("업종 상세 보기", list(sector_results.keys()))
     res, sub = sector_results[sec_pick]
-    render_detail(res, sub, f"'{sec_pick}' 업종 상세")
+    render_detail(res, sub, f"'{sec_pick}' 업종 상세", show_summary=True, sector=sec_pick)
 
 st.caption("※ 투자 판단과 책임은 본인에게 있습니다. 본 도구는 참고용입니다.")
