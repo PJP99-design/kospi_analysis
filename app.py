@@ -327,6 +327,67 @@ def price_compare_table(df):
     return out.set_index("구분")
 
 
+# ---------- 시장지표 · 리포트 ----------
+INDICATORS = {
+    "국내 증시": [("KOSPI", "KS11"), ("KOSDAQ", "KQ11")],
+    "해외 증시": [("S&P500", "US500"), ("나스닥", "IXIC"), ("다우", "DJI")],
+    "환율": [("달러/원", "USD/KRW"), ("엔/원", "JPY/KRW"), ("유로/원", "EUR/KRW")],
+    "금리": [("미국 10년 국채(%)", "FRED:DGS10"), ("미국 기준금리(%)", "FRED:DFF")],
+    "유가·금": [("WTI 유가($)", "FRED:DCOILWTICO"), ("금($/oz)", "FRED:GOLDAMGBD228NLBM")],
+}
+
+
+@st.cache_data(show_spinner=False, ttl=1800)
+def fetch_indicator(ticker):
+    """최근 종가와 전일대비 변화율. 실패 시 None."""
+    try:
+        start = datetime.date.today() - datetime.timedelta(days=30)
+        df = fdr.DataReader(ticker, start)
+        if df is None or len(df) == 0:
+            return None
+        col = "Close" if "Close" in df.columns else df.columns[0]
+        s = pd.to_numeric(df[col], errors="coerce").dropna()
+        if len(s) == 0:
+            return None
+        last = float(s.iloc[-1])
+        prev = float(s.iloc[-2]) if len(s) >= 2 else last
+        chg = (last / prev - 1) * 100 if prev else 0.0
+        return last, chg
+    except Exception:
+        return None
+
+
+def render_reports(name, code):
+    """기업명·종목코드 기준 증권사 리포트·리서치 바로가기."""
+    q = urllib.parse.quote(name)
+    naver = f"https://finance.naver.com/research/company_list.naver?searchType=itemCode&itemCode={code}&itemName={q}"
+    hankyung = "https://consensus.hankyung.com/analysis/list?search_text=" + q
+    google = "https://www.google.com/search?q=" + urllib.parse.quote(f"{name} 증권사 리포트 목표주가")
+    st.markdown(
+        f"📑 [네이버 금융 종목 리서치]({naver})  ·  "
+        f"[한경 컨센서스(증권사 리포트)]({hankyung})  ·  "
+        f"[구글에서 '{name}' 리포트 검색]({google})")
+    st.caption("증권사 애널리스트 리포트·목표주가·리서치를 위 링크에서 바로 확인할 수 있어요.")
+
+
+def render_market():
+    st.subheader("🌐 주요 시장지표")
+    st.caption("국내외 증시·환율·금리·유가·금 시세 (약 30분 캐시). "
+               "일부 지표는 제공처 사정으로 지연·누락될 수 있어요.")
+    for group, items in INDICATORS.items():
+        st.markdown(f"#### {group}")
+        cols = st.columns(len(items))
+        for col, (label, ticker) in zip(cols, items):
+            r = fetch_indicator(ticker)
+            if r is None:
+                col.metric(label, "-")
+            else:
+                last, chg = r
+                col.metric(label, f"{last:,.2f}", f"{chg:+.2f}%")
+    st.markdown("#### 📰 주요 뉴스")
+    render_news("증시 시황")
+
+
 # ---------- 탭 렌더 ----------
 def render_news(name):
     """기업명 기준 네이버·구글 뉴스 바로가기 + 구글 뉴스 헤드라인."""
@@ -458,8 +519,8 @@ def tab_technical(result, focus):
     st.caption(f"RSI ({tf} 기준 · 70 위 과매수 · 30 아래 과매도)")
     st.line_chart(o[["RSI"]])
 
-    st.markdown("#### 📰 뉴스·이슈")
-    render_news(pick)
+    st.markdown("#### 📑 증권사 리포트·리서치")
+    render_reports(pick, result.loc[pick, "코드"])
 
 
 def render_detail(result, sub, label, focus=None, show_summary=False, sector=None):
@@ -492,6 +553,14 @@ if not api_key:
         st.rerun()
     st.stop()
 
+st.sidebar.header("⚙️ 설정")
+mode = st.sidebar.radio("분석 모드",
+                        ["단일 업종 상세", "전체 업종 요약", "종목 검색", "주요 시장지표"])
+
+if mode == "주요 시장지표":
+    render_market()
+    st.stop()
+
 try:
     with st.spinner("KOSPI 상장목록·업종 정보를 불러오는 중... (처음엔 수십 초)"):
         listing = get_kospi_listing()
@@ -505,8 +574,6 @@ valid_sectors = []
 if listing is not None:
     valid_sectors = sorted(s for s in listing["업종"].dropna().unique() if s != "(기타)")
 
-st.sidebar.header("⚙️ 설정")
-mode = st.sidebar.radio("분석 모드", ["단일 업종 상세", "전체 업종 요약", "종목 검색"])
 periods = period_options()
 plabels = list(periods.keys())
 psel = st.sidebar.selectbox("재무 기준 (분기)", plabels, index=plabels.index("2025년 4분기"))
