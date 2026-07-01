@@ -6,6 +6,7 @@ app.py — KOSPI 종목 분석 애플리케이션 (Streamlit)
 """
 import os
 import re
+import io
 import datetime
 import urllib.parse
 import xml.etree.ElementTree as ET
@@ -14,6 +15,7 @@ import pandas as pd
 import streamlit as st
 import FinanceDataReader as fdr
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 
 try:
     import opendartreader as _odr
@@ -392,27 +394,33 @@ def get_investor_trading(code):
 def get_investor_trading_naver(code):
     """네이버 금융 외국인·기관 순매매(최근 5거래일 누적). 실패 시 None."""
     url = f"https://finance.naver.com/item/frgn.naver?code={code}"
+    headers = {"User-Agent": "Mozilla/5.0",
+               "Referer": f"https://finance.naver.com/item/main.naver?code={code}"}
     try:
-        r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
+        r = requests.get(url, headers=headers, timeout=10)
         r.encoding = "euc-kr"
-        tables = pd.read_html(r.text)
+        tables = pd.read_html(io.StringIO(r.text))
     except Exception:
         return None
+
+    def label(col):
+        return " ".join(str(x) for x in col) if isinstance(col, tuple) else str(col)
+
     for t in tables:
-        cols = [str(c) for c in t.columns.get_level_values(-1)]
-        if any("기관" in c for c in cols) and any("외국인" in c for c in cols):
-            df = t.copy()
-            df.columns = [str(c) for c in df.columns.get_level_values(-1)]
-            inst_col = next((c for c in df.columns if "기관" in c and "순매매" in c), None)
-            frgn_col = next((c for c in df.columns if "외국인" in c and "순매매" in c), None)
-            if inst_col is None or frgn_col is None:
-                inst_col = next((c for c in df.columns if "기관" in c), None)
-                frgn_col = next((c for c in df.columns if "외국인" in c), None)
-            if inst_col is None or frgn_col is None:
-                return None
-            inst = pd.to_numeric(df[inst_col], errors="coerce").dropna().head(5).sum()
-            frgn = pd.to_numeric(df[frgn_col], errors="coerce").dropna().head(5).sum()
-            return pd.DataFrame({"순매수": {"기관": inst, "외국인": frgn}})[["순매수"]]
+        cols = list(t.columns)
+        inst_c = next((c for c in cols if "기관" in label(c) and "순매매" in label(c)), None)
+        frgn_c = next((c for c in cols if "외국인" in label(c) and "순매매" in label(c)), None)
+        if inst_c is None or frgn_c is None:
+            continue
+        try:
+            inst = t[inst_c].map(to_num).dropna()
+            frgn = t[frgn_c].map(to_num).dropna()
+        except Exception:
+            continue
+        if len(inst) == 0 and len(frgn) == 0:
+            continue
+        return pd.DataFrame({"순매수": {"기관": inst.head(5).sum(),
+                                     "외국인": frgn.head(5).sum()}})[["순매수"]]
     return None
 
 
@@ -429,31 +437,20 @@ def render_reports(name, code):
     st.caption("증권사 애널리스트 리포트·목표주가·리서치를 위 링크에서 바로 확인할 수 있어요.")
 
 
-def render_volume_flow(code, price):
-    st.markdown("#### 📦 거래량 · 투자자 수급")
-    vol = (pd.to_numeric(price["Volume"], errors="coerce").dropna()
-           if "Volume" in price.columns else pd.Series(dtype=float))
-    if len(vol):
-        st.metric("최근 거래량(주)", f"{vol.iloc[-1]:,.0f}")
-        st.caption("최근 60거래일 거래량")
-        st.bar_chart(vol.tail(60))
-    else:
-        st.caption("거래량 데이터를 불러오지 못했어요.")
-
-    st.markdown("**기관 · 외국인 · 개인 매매 (최근 약 5거래일 누적 · 단위: 주)**")
+def render_investor(code, name):
+    st.markdown("#### 📦 투자자 수급 (기관 · 외국인 · 개인)")
     inv, source = get_investor_trading(code)
     if inv is not None and not inv.empty:
-        st.caption(f"데이터 출처: {source}")
+        st.caption(f"데이터 출처: {source} · 최근 약 5거래일 누적 · 단위: 주")
         fmt = {c: "{:,.0f}" for c in inv.columns}
         st.dataframe(inv.style.format(fmt), use_container_width=True)
         if "매수" in inv.columns:
             st.caption("순매수 = 매수 − 매도. 양수면 순매수(사들임), 음수면 순매도(팔아냄).")
-        else:
-            st.caption("KRX 데이터가 일시적으로 막혀 네이버 순매매로 대체했어요. "
-                       "이 경우 매수/매도 분리와 개인 수치는 제공되지 않아요.")
     else:
-        st.caption("투자자별 매매 데이터를 불러오지 못했어요(KRX·네이버 모두 지연·차단 가능). "
-                   "거래량은 위에 표시됩니다.")
+        st.caption("클라우드에서는 KRX가 서버 접근을 막아 기관·외국인·개인 매매 수치를 "
+                   "직접 불러오기 어려워요. 아래 링크에서 바로 확인할 수 있어요.")
+    naver = f"https://finance.naver.com/item/frgn.naver?code={code}"
+    st.markdown(f"🔗 [네이버 금융에서 '{name}' 외국인·기관 매매동향 보기]({naver})")
 
 
 def render_market():
@@ -568,37 +565,47 @@ def tab_technical(result, focus):
     c5.metric("5년 전 대비", f"{v5:+.1f}%" if v5 is not None else "-")
     st.table(price_compare_table(price))
 
-    render_volume_flow(result.loc[pick, "코드"], price)
+    render_investor(result.loc[pick, "코드"], pick)
 
-    st.markdown("#### 📈 봉차트")
+    st.markdown("#### 📈 봉차트 · 거래량")
     tf = st.radio("봉 주기", list(TF_RULE.keys()), horizontal=True, key="tf")
-    o = make_ohlc(price, tf).tail(TF_TAIL[tf])
-    fig = go.Figure()
+    o = make_ohlc(price, tf)
+
+    fig = make_subplots(rows=2, cols=1, shared_xaxes=True,
+                        vertical_spacing=0.04, row_heights=[0.72, 0.28])
+    # 상단: 주가(봉) + 이동평균
     fig.add_trace(go.Candlestick(
         x=o.index, open=o["Open"], high=o["High"], low=o["Low"], close=o["Close"],
-        name="주가", increasing_line_color="#e03131", decreasing_line_color="#1c7ed6"))
+        name="주가", increasing_line_color="#e03131", decreasing_line_color="#1c7ed6"),
+        row=1, col=1)
     fig.add_trace(go.Scatter(x=o.index, y=o["MA5"], name="MA5", line=dict(width=1, color="#f59f00"),
-                             hovertemplate="MA5 %{y:,.0f}원<extra></extra>"))
+                             hovertemplate="MA5 %{y:,.0f}원<extra></extra>"), row=1, col=1)
     fig.add_trace(go.Scatter(x=o.index, y=o["MA20"], name="MA20", line=dict(width=1, color="#7048e8"),
-                             hovertemplate="MA20 %{y:,.0f}원<extra></extra>"))
-    fig.update_layout(height=480, xaxis_rangeslider_visible=False,
+                             hovertemplate="MA20 %{y:,.0f}원<extra></extra>"), row=1, col=1)
+    # 하단: 거래량 (상승 빨강 / 하락 파랑)
+    vol_colors = ["#e03131" if c >= op else "#1c7ed6" for c, op in zip(o["Close"], o["Open"])]
+    fig.add_trace(go.Bar(
+        x=o.index, y=o.get("Volume"), name="거래량", marker_color=vol_colors,
+        hovertemplate="%{x|%Y-%m-%d}<br>거래량 %{y:,.0f}주<extra></extra>"), row=2, col=1)
+
+    fig.update_layout(height=620, xaxis_rangeslider_visible=False, dragmode="pan",
                       margin=dict(l=0, r=0, t=10, b=0), legend=dict(orientation="h"),
-                      dragmode="pan")  # 기본 마우스 동작 = 드래그로 이동(패닝)
-    # 세로축은 데이터에 맞춰 자동, 가로축 이동 시에도 보기 좋게
-    fig.update_yaxes(fixedrange=False, tickformat=",", ticksuffix="원",
-                     hoverformat=",.0f", automargin=True)
-    fig.update_xaxes(fixedrange=False)
+                      showlegend=True)
+    fig.update_yaxes(tickformat=",", ticksuffix="원", hoverformat=",.0f",
+                     automargin=True, row=1, col=1)
+    fig.update_yaxes(tickformat=",", ticksuffix="주", automargin=True, row=2, col=1)
     st.plotly_chart(
         fig,
         use_container_width=True,
         config={
-            "scrollZoom": True,       # 마우스 휠로 확대/축소
-            "displayModeBar": True,   # 상단 도구막대 표시
+            "scrollZoom": True,
+            "displayModeBar": True,
             "displaylogo": False,
             "modeBarButtonsToRemove": ["lasso2d", "select2d"],
         },
     )
-    st.caption("🖱️ 마우스 휠 = 확대/축소 · 드래그 = 좌우 이동 · 더블클릭 = 원래대로")
+    st.caption("상단=주가(봉)·이동평균, 하단=거래량. 🖱️ 휠=확대/축소 · 드래그=이동 · 더블클릭=원래대로. "
+               "봉이나 거래량 막대에 마우스를 올리면 그 날짜의 값이 표시됩니다.")
 
     last = o.iloc[-1]
     if pd.notna(last.get("RSI")):
