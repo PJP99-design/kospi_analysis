@@ -420,12 +420,86 @@ def get_investor_table_naver(code, rows=20):
     return None
 
 
+def _fmt_num(v):
+    """천단위 콤마 (부호 없음)."""
+    if pd.isna(v):
+        return "-"
+    try:
+        return f"{int(round(float(v))):,}"
+    except (ValueError, TypeError):
+        return str(v)
+
+
+def _fmt_signed(v):
+    """자체 부호 값에 +/- 와 콤마."""
+    if pd.isna(v):
+        return "-"
+    try:
+        n = int(round(float(v)))
+    except (ValueError, TypeError):
+        return str(v)
+    return f"{n:+,}" if n != 0 else "0"
+
+
+def _rate_sign(x):
+    """등락률 문자열에서 방향(+1/-1/0) 추출."""
+    s = str(x).strip()
+    if s.startswith("-"):
+        return -1
+    num = re.sub(r"[^0-9.]", "", s)
+    try:
+        return 1 if float(num) > 0 else 0
+    except ValueError:
+        return 0
+
+
+def _fmt_change(v, sign):
+    """전일비 크기에 방향 부호 + 콤마."""
+    if pd.isna(v):
+        return "-"
+    try:
+        n = abs(int(round(float(v))))
+    except (ValueError, TypeError):
+        return str(v)
+    if sign > 0:
+        return f"+{n:,}"
+    if sign < 0:
+        return f"-{n:,}"
+    return f"{n:,}"
+
+
+def _fmt_rate(x):
+    """등락률에 +/- 부호 보장 (%는 유지)."""
+    s = str(x).strip()
+    if s in ("", "nan", "None"):
+        return "-"
+    if s.startswith("-") or s.startswith("+"):
+        return s
+    num = re.sub(r"[^0-9.]", "", s)
+    try:
+        return ("+" + s) if float(num) > 0 else s
+    except ValueError:
+        return s
+
+
 def render_investor(code, name):
     st.markdown("#### 📦 외국인 · 기관 순매매 · 거래량")
     df = get_investor_table_naver(code)
     if df is not None and not df.empty:
-        st.caption("최근 거래일 순 · 순매매량 단위: 주 (양수=순매수, 음수=순매도) · 출처: 네이버 금융")
-        st.dataframe(df, use_container_width=True, hide_index=True)
+        disp = df.copy()
+        signs = disp["등락률"].map(_rate_sign) if "등락률" in disp.columns else None
+        if "전일비" in disp.columns and signs is not None:
+            disp["전일비"] = [_fmt_change(v, s) for v, s in zip(disp["전일비"], signs)]
+        if "등락률" in disp.columns:
+            disp["등락률"] = disp["등락률"].map(_fmt_rate)
+        for c in ["기관 순매매량", "외국인 순매매량"]:
+            if c in disp.columns:
+                disp[c] = disp[c].map(_fmt_signed)
+        for c in ["종가", "거래량", "외국인 보유주수"]:
+            if c in disp.columns:
+                disp[c] = disp[c].map(_fmt_num)
+        st.caption("순매매량: +순매수 / −순매도 · 단위: 주 · 출처: 네이버 금융")
+        st.dataframe(disp, use_container_width=True, hide_index=True)
     else:
         st.caption("표 데이터를 불러오지 못했어요. 아래 링크에서 바로 확인할 수 있어요.")
     naver = f"https://finance.naver.com/item/frgn.naver?code={code}"
@@ -570,10 +644,13 @@ def tab_technical(result, focus):
     fig.update_layout(height=620, xaxis_rangeslider_visible=False, dragmode="pan",
                       margin=dict(l=0, r=0, t=10, b=0), legend=dict(orientation="h"),
                       showlegend=True)
-    fig.update_yaxes(tickformat=",", ticksuffix="원", hoverformat=",.0f",
-                     automargin=True, rangemode="nonnegative", row=1, col=1)
+    price_max = float(pd.to_numeric(o["High"], errors="coerce").max())
+    vol_max = (float(pd.to_numeric(o["Volume"], errors="coerce").max())
+               if "Volume" in o.columns else 1.0)
+    fig.update_yaxes(tickformat=",", ticksuffix="원", hoverformat=",.0f", automargin=True,
+                     range=[0, price_max * 1.05], fixedrange=True, row=1, col=1)
     fig.update_yaxes(tickformat=",", ticksuffix="주", automargin=True,
-                     rangemode="tozero", row=2, col=1)
+                     range=[0, (vol_max or 1.0) * 1.1], fixedrange=True, row=2, col=1)
     st.plotly_chart(
         fig,
         use_container_width=True,
@@ -584,8 +661,9 @@ def tab_technical(result, focus):
             "modeBarButtonsToRemove": ["lasso2d", "select2d"],
         },
     )
-    st.caption("상단=주가(봉)·이동평균, 하단=거래량. 🖱️ 휠=확대/축소 · 드래그=이동 · 더블클릭=원래대로. "
-               "봉이나 거래량 막대에 마우스를 올리면 그 날짜의 값이 표시됩니다.")
+    st.caption("상단=주가(봉)·이동평균, 하단=거래량. 세로축은 0부터 고정. "
+               "🖱️ 휠=시간축 확대/축소 · 드래그=좌우 이동 · 더블클릭=원래대로. "
+               "봉·거래량 막대에 마우스를 올리면 그 날짜의 값이 표시됩니다.")
 
     last = o.iloc[-1]
     if pd.notna(last.get("RSI")):
