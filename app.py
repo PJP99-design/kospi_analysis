@@ -359,35 +359,61 @@ def fetch_indicator(ticker):
 
 @st.cache_data(show_spinner=False, ttl=1800)
 def get_investor_trading(code):
-    """기관·외국인·개인 매수/매도/순매수 수량(최근 약 5거래일 누적). 실패 시 None."""
+    """기관·외국인·개인 매수/매도/순매수 수량(최근 약 5거래일 누적).
+    반환: (DataFrame, 소스라벨). 실패 시 (None, None)."""
     try:
         from pykrx import stock
-    except Exception:
-        return None
-    try:
         today = datetime.date.today()
         frm = (today - datetime.timedelta(days=12)).strftime("%Y%m%d")
         to = today.strftime("%Y%m%d")
         df = stock.get_market_trading_volume_by_investor(frm, to, code)
-        if df is None or len(df) == 0:
-            return None
-        mapping = [("기관", ["기관합계"]), ("외국인", ["외국인합계", "외국인"]), ("개인", ["개인"])]
-        rows = {}
-        for label, keys in mapping:
-            for k in keys:
-                if k in df.index:
-                    r = df.loc[k]
-                    rows[label] = {"매수": to_num(r.get("매수")),
-                                   "매도": to_num(r.get("매도")),
-                                   "순매수": to_num(r.get("순매수"))}
-                    break
-        if not rows:
-            return None
-        out = pd.DataFrame(rows).T
-        order = [x for x in ["기관", "외국인", "개인"] if x in out.index]
-        return out.reindex(order)[["매수", "매도", "순매수"]]
+        if df is not None and len(df):
+            mapping = [("기관", ["기관합계"]), ("외국인", ["외국인합계", "외국인"]), ("개인", ["개인"])]
+            rows = {}
+            for label, keys in mapping:
+                for k in keys:
+                    if k in df.index:
+                        r = df.loc[k]
+                        rows[label] = {"매수": to_num(r.get("매수")),
+                                       "매도": to_num(r.get("매도")),
+                                       "순매수": to_num(r.get("순매수"))}
+                        break
+            if rows:
+                out = pd.DataFrame(rows).T
+                order = [x for x in ["기관", "외국인", "개인"] if x in out.index]
+                return out.reindex(order)[["매수", "매도", "순매수"]], "KRX 기준 (매수·매도·순매수)"
+    except Exception:
+        pass
+    # 대체: 네이버 (기관·외국인 순매매만)
+    return get_investor_trading_naver(code), "네이버 기준 (순매매만 · 개인 제외)"
+
+
+@st.cache_data(show_spinner=False, ttl=1800)
+def get_investor_trading_naver(code):
+    """네이버 금융 외국인·기관 순매매(최근 5거래일 누적). 실패 시 None."""
+    url = f"https://finance.naver.com/item/frgn.naver?code={code}"
+    try:
+        r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
+        r.encoding = "euc-kr"
+        tables = pd.read_html(r.text)
     except Exception:
         return None
+    for t in tables:
+        cols = [str(c) for c in t.columns.get_level_values(-1)]
+        if any("기관" in c for c in cols) and any("외국인" in c for c in cols):
+            df = t.copy()
+            df.columns = [str(c) for c in df.columns.get_level_values(-1)]
+            inst_col = next((c for c in df.columns if "기관" in c and "순매매" in c), None)
+            frgn_col = next((c for c in df.columns if "외국인" in c and "순매매" in c), None)
+            if inst_col is None or frgn_col is None:
+                inst_col = next((c for c in df.columns if "기관" in c), None)
+                frgn_col = next((c for c in df.columns if "외국인" in c), None)
+            if inst_col is None or frgn_col is None:
+                return None
+            inst = pd.to_numeric(df[inst_col], errors="coerce").dropna().head(5).sum()
+            frgn = pd.to_numeric(df[frgn_col], errors="coerce").dropna().head(5).sum()
+            return pd.DataFrame({"순매수": {"기관": inst, "외국인": frgn}})[["순매수"]]
+    return None
 
 
 def render_reports(name, code):
@@ -415,12 +441,18 @@ def render_volume_flow(code, price):
         st.caption("거래량 데이터를 불러오지 못했어요.")
 
     st.markdown("**기관 · 외국인 · 개인 매매 (최근 약 5거래일 누적 · 단위: 주)**")
-    inv = get_investor_trading(code)
+    inv, source = get_investor_trading(code)
     if inv is not None and not inv.empty:
-        st.dataframe(inv.style.format("{:,.0f}"), use_container_width=True)
-        st.caption("순매수 = 매수 − 매도. 양수면 순매수(사들임), 음수면 순매도(팔아냄).")
+        st.caption(f"데이터 출처: {source}")
+        fmt = {c: "{:,.0f}" for c in inv.columns}
+        st.dataframe(inv.style.format(fmt), use_container_width=True)
+        if "매수" in inv.columns:
+            st.caption("순매수 = 매수 − 매도. 양수면 순매수(사들임), 음수면 순매도(팔아냄).")
+        else:
+            st.caption("KRX 데이터가 일시적으로 막혀 네이버 순매매로 대체했어요. "
+                       "이 경우 매수/매도 분리와 개인 수치는 제공되지 않아요.")
     else:
-        st.caption("투자자별 매매 데이터를 불러오지 못했어요(KRX 제공 지연·차단 가능). "
+        st.caption("투자자별 매매 데이터를 불러오지 못했어요(KRX·네이버 모두 지연·차단 가능). "
                    "거래량은 위에 표시됩니다.")
 
 
