@@ -357,6 +357,39 @@ def fetch_indicator(ticker):
         return None
 
 
+@st.cache_data(show_spinner=False, ttl=1800)
+def get_investor_trading(code):
+    """기관·외국인·개인 매수/매도/순매수 수량(최근 약 5거래일 누적). 실패 시 None."""
+    try:
+        from pykrx import stock
+    except Exception:
+        return None
+    try:
+        today = datetime.date.today()
+        frm = (today - datetime.timedelta(days=12)).strftime("%Y%m%d")
+        to = today.strftime("%Y%m%d")
+        df = stock.get_market_trading_volume_by_investor(frm, to, code)
+        if df is None or len(df) == 0:
+            return None
+        mapping = [("기관", ["기관합계"]), ("외국인", ["외국인합계", "외국인"]), ("개인", ["개인"])]
+        rows = {}
+        for label, keys in mapping:
+            for k in keys:
+                if k in df.index:
+                    r = df.loc[k]
+                    rows[label] = {"매수": to_num(r.get("매수")),
+                                   "매도": to_num(r.get("매도")),
+                                   "순매수": to_num(r.get("순매수"))}
+                    break
+        if not rows:
+            return None
+        out = pd.DataFrame(rows).T
+        order = [x for x in ["기관", "외국인", "개인"] if x in out.index]
+        return out.reindex(order)[["매수", "매도", "순매수"]]
+    except Exception:
+        return None
+
+
 def render_reports(name, code):
     """기업명·종목코드 기준 증권사 리포트·리서치 바로가기."""
     q = urllib.parse.quote(name)
@@ -368,6 +401,27 @@ def render_reports(name, code):
         f"[한경 컨센서스(증권사 리포트)]({hankyung})  ·  "
         f"[구글에서 '{name}' 리포트 검색]({google})")
     st.caption("증권사 애널리스트 리포트·목표주가·리서치를 위 링크에서 바로 확인할 수 있어요.")
+
+
+def render_volume_flow(code, price):
+    st.markdown("#### 📦 거래량 · 투자자 수급")
+    vol = (pd.to_numeric(price["Volume"], errors="coerce").dropna()
+           if "Volume" in price.columns else pd.Series(dtype=float))
+    if len(vol):
+        st.metric("최근 거래량(주)", f"{vol.iloc[-1]:,.0f}")
+        st.caption("최근 60거래일 거래량")
+        st.bar_chart(vol.tail(60))
+    else:
+        st.caption("거래량 데이터를 불러오지 못했어요.")
+
+    st.markdown("**기관 · 외국인 · 개인 매매 (최근 약 5거래일 누적 · 단위: 주)**")
+    inv = get_investor_trading(code)
+    if inv is not None and not inv.empty:
+        st.dataframe(inv.style.format("{:,.0f}"), use_container_width=True)
+        st.caption("순매수 = 매수 − 매도. 양수면 순매수(사들임), 음수면 순매도(팔아냄).")
+    else:
+        st.caption("투자자별 매매 데이터를 불러오지 못했어요(KRX 제공 지연·차단 가능). "
+                   "거래량은 위에 표시됩니다.")
 
 
 def render_market():
@@ -481,6 +535,8 @@ def tab_technical(result, focus):
     c3.metric("3년 전 대비", f"{v3:+.1f}%" if v3 is not None else "-")
     c5.metric("5년 전 대비", f"{v5:+.1f}%" if v5 is not None else "-")
     st.table(price_compare_table(price))
+
+    render_volume_flow(result.loc[pick, "코드"], price)
 
     st.markdown("#### 📈 봉차트")
     tf = st.radio("봉 주기", list(TF_RULE.keys()), horizontal=True, key="tf")
