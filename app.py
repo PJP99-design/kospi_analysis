@@ -44,6 +44,14 @@ TF_TAIL = {"일봉": 180, "주봉": 150, "월봉": 120}
 
 
 # ---------- 유틸 ----------
+def safe_gradient(styler, subset):
+    """matplotlib 없으면 색칠만 건너뛰고 표는 그대로 표시(앱이 죽지 않게)."""
+    try:
+        return styler.background_gradient(subset=subset, cmap="Greens")
+    except Exception:
+        return styler
+
+
 def to_num(x):
     if x is None:
         return float("nan")
@@ -568,7 +576,7 @@ def tab_fundamental(result, sub, label):
     st.subheader(f"{label} · {len(result)}종목")
     st.markdown("#### ① 종합 점수표")
     st.dataframe(
-        result[SCORE_COLS].style.format("{:,.1f}").background_gradient(subset=["매력도"], cmap="Greens"),
+        safe_gradient(result[SCORE_COLS].style.format("{:,.1f}"), ["매력도"]),
         use_container_width=True)
     c1, c2 = st.columns([1, 2])
     top = result.index[0]
@@ -800,9 +808,9 @@ else:  # 전체 업종 요약
     summary = pd.DataFrame(rows).sort_values("매력도", ascending=False).set_index("업종")
     st.subheader(f"전체 업종 요약 — 업종별 1위 ({len(summary)}개 업종)")
     st.caption("※ 매력도는 각 업종 내부의 상대 순위입니다.")
-    st.dataframe(summary.style.format({"매력도": "{:,.1f}", "안정성": "{:,.1f}",
-                 "수익성": "{:,.1f}", "밸류에이션": "{:,.1f}"})
-                 .background_gradient(subset=["매력도"], cmap="Greens"), use_container_width=True)
+    st.dataframe(safe_gradient(summary.style.format({"매력도": "{:,.1f}", "안정성": "{:,.1f}",
+                 "수익성": "{:,.1f}", "밸류에이션": "{:,.1f}"}), ["매력도"]),
+                 use_container_width=True)
     st.markdown("---")
     sec_pick = st.selectbox("업종 상세 보기", list(sector_results.keys()))
     res, sub = sector_results[sec_pick]
