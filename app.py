@@ -10,6 +10,7 @@ import io
 import datetime
 import urllib.parse
 import xml.etree.ElementTree as ET
+from contextlib import contextmanager
 import requests
 import pandas as pd
 import streamlit as st
@@ -44,6 +45,21 @@ TF_TAIL = {"일봉": 180, "주봉": 150, "월봉": 120}
 
 
 # ---------- 유틸 ----------
+@contextmanager
+def guard(label="이 부분"):
+    """어떤 섹션에서 오류가 나도 그 칸만 건너뛰고 앱 전체는 계속 동작하게 한다."""
+    try:
+        yield
+    except Exception as e:
+        # Streamlit 흐름 제어(st.stop/st.rerun)는 그대로 통과시킴
+        if type(e).__name__ in ("StopException", "RerunException", "RerunData"):
+            raise
+        st.warning(f"⚠️ {label}을(를) 표시하는 중 문제가 생겨 이 부분만 건너뛰었어요. "
+                   "다른 기능은 정상 이용할 수 있어요.")
+        with st.expander("자세한 원인 보기 (개발용)"):
+            st.exception(e)
+
+
 def safe_gradient(styler, subset):
     """matplotlib 없으면 색칠만 건너뛰고 표는 그대로 표시(앱이 죽지 않게)."""
     try:
@@ -319,22 +335,34 @@ def make_ohlc(df, tf):
 
 
 def price_compare_table(df):
+    def fmt_date(d):
+        try:
+            return pd.Timestamp(d).strftime("%Y-%m-%d")
+        except Exception:
+            return "-"
+
+    def fmt_won(v):
+        return f"{v:,.0f}원" if pd.notna(v) else "-"
+
+    def fmt_pct(v):
+        return f"{v:+.1f}%" if pd.notna(v) else "—"
+
     last_date = df.index[-1]
     cur = df["Close"].iloc[-1]
-    rows = [("현재", last_date, cur, None)]
+    rows = [("현재", fmt_date(last_date), fmt_won(cur), "—")]
     for label, yrs in [("3년 전", 3), ("5년 전", 5)]:
-        tgt = last_date - pd.DateOffset(years=yrs)
-        s = df[df.index <= tgt]
-        if len(s):
-            past = s["Close"].iloc[-1]
-            rows.append((label, s.index[-1], past, (cur / past - 1) * 100))
-        else:
-            rows.append((label, None, None, None))
-    out = pd.DataFrame(rows, columns=["구분", "날짜", "종가", "현재가 대비"])
-    out["날짜"] = out["날짜"].apply(lambda d: d.strftime("%Y-%m-%d") if d is not None else "-")
-    out["종가"] = out["종가"].apply(lambda v: f"{v:,.0f}원" if pd.notna(v) else "-")
-    out["현재가 대비"] = out["현재가 대비"].apply(lambda v: f"{v:+.1f}%" if pd.notna(v) else "—")
-    return out.set_index("구분")
+        try:
+            tgt = last_date - pd.DateOffset(years=yrs)
+            s = df[df.index <= tgt]
+            if len(s):
+                past = s["Close"].iloc[-1]
+                rows.append((label, fmt_date(s.index[-1]), fmt_won(past),
+                             fmt_pct((cur / past - 1) * 100)))
+            else:
+                rows.append((label, "-", "-", "—"))
+        except Exception:
+            rows.append((label, "-", "-", "—"))
+    return pd.DataFrame(rows, columns=["구분", "날짜", "종가", "현재가 대비"]).set_index("구분")
 
 
 # ---------- 시장지표 · 리포트 ----------
@@ -611,94 +639,101 @@ def tab_technical(result, focus):
         st.warning("주가 데이터를 받지 못했습니다. 잠시 후 다시 시도해 주세요.")
         return
 
-    st.markdown("#### 📅 장기 주가 비교 (현재 · 3년 전 · 5년 전)")
-    cur = price["Close"].iloc[-1]
+    with guard("장기 주가 비교"):
+        st.markdown("#### 📅 장기 주가 비교 (현재 · 3년 전 · 5년 전)")
+        cur = price["Close"].iloc[-1]
 
-    def chg(years):
-        tgt = price.index[-1] - pd.DateOffset(years=years)
-        s = price[price.index <= tgt]
-        return None if len(s) == 0 else (cur / s["Close"].iloc[-1] - 1) * 100
+        def chg(years):
+            tgt = price.index[-1] - pd.DateOffset(years=years)
+            s = price[price.index <= tgt]
+            return None if len(s) == 0 else (cur / s["Close"].iloc[-1] - 1) * 100
 
-    c0, c3, c5 = st.columns(3)
-    c0.metric("현재가", f"{cur:,.0f} 원")
-    v3, v5 = chg(3), chg(5)
-    c3.metric("3년 전 대비", f"{v3:+.1f}%" if v3 is not None else "-")
-    c5.metric("5년 전 대비", f"{v5:+.1f}%" if v5 is not None else "-")
-    st.table(price_compare_table(price))
+        c0, c3, c5 = st.columns(3)
+        c0.metric("현재가", f"{cur:,.0f} 원")
+        v3, v5 = chg(3), chg(5)
+        c3.metric("3년 전 대비", f"{v3:+.1f}%" if v3 is not None else "-")
+        c5.metric("5년 전 대비", f"{v5:+.1f}%" if v5 is not None else "-")
+        st.table(price_compare_table(price))
 
-    render_investor(result.loc[pick, "코드"], pick)
+    with guard("투자자 매매동향"):
+        render_investor(result.loc[pick, "코드"], pick)
 
-    st.markdown("#### 📈 봉차트 · 거래량")
-    tf = st.radio("봉 주기", list(TF_RULE.keys()), horizontal=True, key="tf")
-    o = make_ohlc(price, tf)
+    with guard("봉차트·거래량"):
+        st.markdown("#### 📈 봉차트 · 거래량")
+        tf = st.radio("봉 주기", list(TF_RULE.keys()), horizontal=True, key="tf")
+        o = make_ohlc(price, tf)
 
-    fig = make_subplots(rows=2, cols=1, shared_xaxes=True,
-                        vertical_spacing=0.04, row_heights=[0.72, 0.28])
-    # 상단: 주가(봉) + 이동평균
-    fig.add_trace(go.Candlestick(
-        x=o.index, open=o["Open"], high=o["High"], low=o["Low"], close=o["Close"],
-        name="주가", increasing_line_color="#e03131", decreasing_line_color="#1c7ed6"),
-        row=1, col=1)
-    fig.add_trace(go.Scatter(x=o.index, y=o["MA5"], name="MA5", line=dict(width=1, color="#f59f00"),
-                             hovertemplate="MA5 %{y:,.0f}원<extra></extra>"), row=1, col=1)
-    fig.add_trace(go.Scatter(x=o.index, y=o["MA20"], name="MA20", line=dict(width=1, color="#7048e8"),
-                             hovertemplate="MA20 %{y:,.0f}원<extra></extra>"), row=1, col=1)
-    # 하단: 거래량 (상승 빨강 / 하락 파랑)
-    vol_colors = ["#e03131" if c >= op else "#1c7ed6" for c, op in zip(o["Close"], o["Open"])]
-    fig.add_trace(go.Bar(
-        x=o.index, y=o.get("Volume"), name="거래량", marker_color=vol_colors,
-        hovertemplate="%{x|%Y-%m-%d}<br>거래량 %{y:,.0f}주<extra></extra>"), row=2, col=1)
+        fig = make_subplots(rows=2, cols=1, shared_xaxes=True,
+                            vertical_spacing=0.04, row_heights=[0.72, 0.28])
+        fig.add_trace(go.Candlestick(
+            x=o.index, open=o["Open"], high=o["High"], low=o["Low"], close=o["Close"],
+            name="주가", increasing_line_color="#e03131", decreasing_line_color="#1c7ed6"),
+            row=1, col=1)
+        fig.add_trace(go.Scatter(x=o.index, y=o["MA5"], name="MA5", line=dict(width=1, color="#f59f00"),
+                                 hovertemplate="MA5 %{y:,.0f}원<extra></extra>"), row=1, col=1)
+        fig.add_trace(go.Scatter(x=o.index, y=o["MA20"], name="MA20", line=dict(width=1, color="#7048e8"),
+                                 hovertemplate="MA20 %{y:,.0f}원<extra></extra>"), row=1, col=1)
+        vol_colors = ["#e03131" if c >= op else "#1c7ed6" for c, op in zip(o["Close"], o["Open"])]
+        fig.add_trace(go.Bar(
+            x=o.index, y=o.get("Volume"), name="거래량", marker_color=vol_colors,
+            hovertemplate="%{x|%Y-%m-%d}<br>거래량 %{y:,.0f}주<extra></extra>"), row=2, col=1)
 
-    fig.update_layout(height=620, xaxis_rangeslider_visible=False, dragmode="pan",
-                      margin=dict(l=0, r=0, t=10, b=0), legend=dict(orientation="h"),
-                      showlegend=True)
-    price_max = float(pd.to_numeric(o["High"], errors="coerce").max())
-    vol_max = (float(pd.to_numeric(o["Volume"], errors="coerce").max())
-               if "Volume" in o.columns else 1.0)
-    fig.update_yaxes(tickformat=",", ticksuffix="원", hoverformat=",.0f", automargin=True,
-                     range=[0, price_max * 1.05], fixedrange=True, row=1, col=1)
-    fig.update_yaxes(tickformat=",", ticksuffix="주", automargin=True,
-                     range=[0, (vol_max or 1.0) * 1.1], fixedrange=True, row=2, col=1)
-    st.plotly_chart(
-        fig,
-        use_container_width=True,
-        config={
-            "scrollZoom": True,
-            "displayModeBar": True,
-            "displaylogo": False,
-            "modeBarButtonsToRemove": ["lasso2d", "select2d"],
-        },
-    )
-    st.caption("상단=주가(봉)·이동평균, 하단=거래량. 세로축은 0부터 고정. "
-               "🖱️ 휠=시간축 확대/축소 · 드래그=좌우 이동 · 더블클릭=원래대로. "
-               "봉·거래량 막대에 마우스를 올리면 그 날짜의 값이 표시됩니다.")
+        fig.update_layout(height=620, xaxis_rangeslider_visible=False, dragmode="pan",
+                          margin=dict(l=0, r=0, t=10, b=0), legend=dict(orientation="h"),
+                          showlegend=True)
+        price_max = float(pd.to_numeric(o["High"], errors="coerce").max())
+        vol_max = (float(pd.to_numeric(o["Volume"], errors="coerce").max())
+                   if "Volume" in o.columns else 1.0)
+        fig.update_yaxes(tickformat=",", ticksuffix="원", hoverformat=",.0f", automargin=True,
+                         range=[0, price_max * 1.05], fixedrange=True, row=1, col=1)
+        fig.update_yaxes(tickformat=",", ticksuffix="주", automargin=True,
+                         range=[0, (vol_max or 1.0) * 1.1], fixedrange=True, row=2, col=1)
+        st.plotly_chart(
+            fig,
+            use_container_width=True,
+            config={
+                "scrollZoom": True,
+                "displayModeBar": True,
+                "displaylogo": False,
+                "modeBarButtonsToRemove": ["lasso2d", "select2d"],
+            },
+        )
+        st.caption("상단=주가(봉)·이동평균, 하단=거래량. 세로축은 0부터 고정. "
+                   "🖱️ 휠=시간축 확대/축소 · 드래그=좌우 이동 · 더블클릭=원래대로. "
+                   "봉·거래량 막대에 마우스를 올리면 그 날짜의 값이 표시됩니다.")
 
-    last = o.iloc[-1]
-    if pd.notna(last.get("RSI")):
-        state = "과매수" if last["RSI"] > 70 else ("과매도" if last["RSI"] < 30 else "중립")
-        st.metric(f"RSI(14) · {tf}", f"{last['RSI']:.0f}", state)
-    st.caption(f"RSI ({tf} 기준 · 70 위 과매수 · 30 아래 과매도)")
-    st.line_chart(o[["RSI"]])
+        last = o.iloc[-1]
+        if pd.notna(last.get("RSI")):
+            state = "과매수" if last["RSI"] > 70 else ("과매도" if last["RSI"] < 30 else "중립")
+            st.metric(f"RSI(14) · {tf}", f"{last['RSI']:.0f}", state)
+        st.caption(f"RSI ({tf} 기준 · 70 위 과매수 · 30 아래 과매도)")
+        st.line_chart(o[["RSI"]])
 
-    st.markdown("#### 📑 증권사 리포트·리서치")
-    render_reports(pick, result.loc[pick, "코드"])
+    with guard("증권사 리포트"):
+        st.markdown("#### 📑 증권사 리포트·리서치")
+        render_reports(pick, result.loc[pick, "코드"])
 
 
 def render_detail(result, sub, label, focus=None, show_summary=False, sector=None):
     if show_summary:
         t0, t1, t2 = st.tabs(["📋 분석 요약", "📑 1차 · 기본적 분석", "📈 2차 · 기술적 분석"])
         with t0:
-            tab_summary(result, focus or result.index[0], sector=sector)
+            with guard("분석 요약"):
+                tab_summary(result, focus or result.index[0], sector=sector)
         with t1:
-            tab_fundamental(result, sub, label)
+            with guard("1차 기본적 분석"):
+                tab_fundamental(result, sub, label)
         with t2:
-            tab_technical(result, focus)
+            with guard("2차 기술적 분석"):
+                tab_technical(result, focus)
     else:
         t1, t2 = st.tabs(["📑 1차 · 기본적 분석", "📈 2차 · 기술적 분석"])
         with t1:
-            tab_fundamental(result, sub, label)
+            with guard("1차 기본적 분석"):
+                tab_fundamental(result, sub, label)
         with t2:
-            tab_technical(result, focus)
+            with guard("2차 기술적 분석"):
+                tab_technical(result, focus)
 
 
 # ---------- 화면 ----------
@@ -719,7 +754,8 @@ mode = st.sidebar.radio("분석 모드",
                         ["단일 업종 상세", "전체 업종 요약", "종목 검색", "주요 시장지표"])
 
 if mode == "주요 시장지표":
-    render_market()
+    with guard("주요 시장지표"):
+        render_market()
     st.stop()
 
 try:
@@ -760,15 +796,17 @@ def run_group(stocks, label, focus=None, show_summary=False, sector=None):
 
 if not valid_sectors:
     st.info("업종 정보를 받지 못해 기본 종목군(전기전자)으로 진행합니다.")
-    run_group(FALLBACK_STOCKS, "전기전자(기본)")
+    with guard("기본 종목군 분석"):
+        run_group(FALLBACK_STOCKS, "전기전자(기본)")
     st.stop()
 
 if mode == "단일 업종 상세":
     default_idx = valid_sectors.index("전기전자") if "전기전자" in valid_sectors else 0
     sector = st.sidebar.selectbox("업종 선택", valid_sectors, index=default_idx)
     sub_list = listing[listing["업종"] == sector].sort_values("시가총액", ascending=False).head(max_n)
-    run_group(dict(zip(sub_list["코드"], sub_list["이름"])), f"'{sector}' 업종 매력도 순위",
-              show_summary=True, sector=sector)
+    with guard("단일 업종 분석"):
+        run_group(dict(zip(sub_list["코드"], sub_list["이름"])), f"'{sector}' 업종 매력도 순위",
+                  show_summary=True, sector=sector)
 
 elif mode == "종목 검색":
     names_all = listing.sort_values("시가총액", ascending=False)["이름"].tolist()
@@ -779,41 +817,43 @@ elif mode == "종목 검색":
     grp = listing[listing["업종"] == qsector].sort_values("시가총액", ascending=False).head(max_n)
     stocks = dict(zip(grp["코드"], grp["이름"]))
     stocks[qcode] = q
-    run_group(stocks, f"'{qsector}' 업종 내 분석", focus=q, show_summary=True, sector=qsector)
+    with guard("종목 검색 분석"):
+        run_group(stocks, f"'{qsector}' 업종 내 분석", focus=q, show_summary=True, sector=qsector)
 
 else:  # 전체 업종 요약
     k = st.sidebar.slider("업종별 분석 종목 수", 3, 15, 5)
     st.info("⏳ KOSPI 전체 업종을 훑습니다. 처음엔 몇 분 걸릴 수 있어요.")
-    uni = (listing[listing["업종"].isin(valid_sectors)]
-           .sort_values("시가총액", ascending=False).groupby("업종").head(k))
-    prog = st.progress(0.0, text="재무 데이터 수집 중...")
-    metrics = build_metrics(dict(zip(uni["코드"], uni["이름"])), int(year), reprt_code,
-                            api_key, marcap_map, price_map, prog)
-    prog.empty()
-    if metrics.empty:
-        st.error("데이터를 가져오지 못했습니다. 재무 기준(분기)을 확인하세요.")
-        st.stop()
-    sector_of = dict(zip(uni["코드"], uni["업종"]))
-    metrics["업종"] = metrics["코드"].map(sector_of)
-    rows, sector_results = [], {}
-    for sec, grp in metrics.groupby("업종"):
-        if len(grp) < 2:
-            continue
-        res, sub_s = score_and_rank(grp.drop(columns=["업종"]), w_s, w_p, w_v)
-        sector_results[sec] = (res, sub_s)
-        t = res.index[0]
-        rows.append({"업종": sec, "대표종목(1위)": t, "매력도": res.loc[t, "매력도"],
-                     "안정성": res.loc[t, "안정성"], "수익성": res.loc[t, "수익성"],
-                     "밸류에이션": res.loc[t, "밸류에이션"], "비교군": ", ".join(res.index[1:4])})
-    summary = pd.DataFrame(rows).sort_values("매력도", ascending=False).set_index("업종")
-    st.subheader(f"전체 업종 요약 — 업종별 1위 ({len(summary)}개 업종)")
-    st.caption("※ 매력도는 각 업종 내부의 상대 순위입니다.")
-    st.dataframe(safe_gradient(summary.style.format({"매력도": "{:,.1f}", "안정성": "{:,.1f}",
-                 "수익성": "{:,.1f}", "밸류에이션": "{:,.1f}"}), ["매력도"]),
-                 use_container_width=True)
-    st.markdown("---")
-    sec_pick = st.selectbox("업종 상세 보기", list(sector_results.keys()))
-    res, sub = sector_results[sec_pick]
-    render_detail(res, sub, f"'{sec_pick}' 업종 상세", show_summary=True, sector=sec_pick)
+    with guard("전체 업종 요약"):
+        uni = (listing[listing["업종"].isin(valid_sectors)]
+               .sort_values("시가총액", ascending=False).groupby("업종").head(k))
+        prog = st.progress(0.0, text="재무 데이터 수집 중...")
+        metrics = build_metrics(dict(zip(uni["코드"], uni["이름"])), int(year), reprt_code,
+                                api_key, marcap_map, price_map, prog)
+        prog.empty()
+        if metrics.empty:
+            st.error("데이터를 가져오지 못했습니다. 재무 기준(분기)을 확인하세요.")
+            st.stop()
+        sector_of = dict(zip(uni["코드"], uni["업종"]))
+        metrics["업종"] = metrics["코드"].map(sector_of)
+        rows, sector_results = [], {}
+        for sec, grp in metrics.groupby("업종"):
+            if len(grp) < 2:
+                continue
+            res, sub_s = score_and_rank(grp.drop(columns=["업종"]), w_s, w_p, w_v)
+            sector_results[sec] = (res, sub_s)
+            t = res.index[0]
+            rows.append({"업종": sec, "대표종목(1위)": t, "매력도": res.loc[t, "매력도"],
+                         "안정성": res.loc[t, "안정성"], "수익성": res.loc[t, "수익성"],
+                         "밸류에이션": res.loc[t, "밸류에이션"], "비교군": ", ".join(res.index[1:4])})
+        summary = pd.DataFrame(rows).sort_values("매력도", ascending=False).set_index("업종")
+        st.subheader(f"전체 업종 요약 — 업종별 1위 ({len(summary)}개 업종)")
+        st.caption("※ 매력도는 각 업종 내부의 상대 순위입니다.")
+        st.dataframe(safe_gradient(summary.style.format({"매력도": "{:,.1f}", "안정성": "{:,.1f}",
+                     "수익성": "{:,.1f}", "밸류에이션": "{:,.1f}"}), ["매력도"]),
+                     use_container_width=True)
+        st.markdown("---")
+        sec_pick = st.selectbox("업종 상세 보기", list(sector_results.keys()))
+        res, sub = sector_results[sec_pick]
+        render_detail(res, sub, f"'{sec_pick}' 업종 상세", show_summary=True, sector=sec_pick)
 
 st.caption("※ 투자 판단과 책임은 본인에게 있습니다. 본 도구는 참고용입니다.")
