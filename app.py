@@ -127,10 +127,24 @@ def save_api_key(k):
 
 
 def period_options():
-    opts = {"2026년 1분기": (2026, Q2CODE[1])}
-    for y in range(2025, 2021, -1):
+    """오늘 날짜 기준, 공시됐을 최신 분기를 맨 앞(가장 최근)에 두고 과거순으로 나열."""
+    today = datetime.date.today()
+    y, md = today.year, (today.month, today.day)
+    # 대략의 정기공시 마감: 1분기 5/15, 반기 8/14, 3분기 11/14
+    if md >= (11, 14):
+        latest_q = 3
+    elif md >= (8, 14):
+        latest_q = 2
+    elif md >= (5, 15):
+        latest_q = 1
+    else:
+        latest_q = 0  # 올해 분기 공시 전 → 전년 자료부터
+    opts = {}
+    for q in range(latest_q, 0, -1):          # 올해: 최신분기 → 1분기
+        opts[f"{y}년 {q}분기"] = (y, Q2CODE[q])
+    for yy in range(y - 1, y - 6, -1):        # 과거 5개년: 4~1분기
         for q in (4, 3, 2, 1):
-            opts[f"{y}년 {q}분기"] = (y, Q2CODE[q])
+            opts[f"{yy}년 {q}분기"] = (yy, Q2CODE[q])
     return opts
 
 
@@ -780,11 +794,17 @@ valid_sectors = []
 if listing is not None:
     valid_sectors = sorted(s for s in listing["업종"].dropna().unique() if s != "(기타)")
 
+# 업종 선택 — 분석 모드 바로 아래 (단일 업종 상세 모드에서만 표시)
+sector = None
+if mode == "단일 업종 상세" and valid_sectors:
+    default_idx = valid_sectors.index("전기전자") if "전기전자" in valid_sectors else 0
+    sector = st.sidebar.selectbox("업종 선택", valid_sectors, index=default_idx)
+
 periods = period_options()
 plabels = list(periods.keys())
-psel = st.sidebar.selectbox("재무 기준 (분기)", plabels, index=plabels.index("2025년 4분기"))
+psel = st.sidebar.selectbox("재무 기준 (분기)", plabels, index=0)  # 항상 가장 최근
 year, reprt_code = periods[psel]
-st.sidebar.caption("4분기=연간, 2분기=반기누적. 2026년 1분기는 공시된 종목만. 주가는 항상 실시간.")
+st.sidebar.caption("항상 가장 최근 분기가 기본. 최신 분기는 공시된 종목만 반영돼요. 주가는 실시간.")
 st.sidebar.markdown("**매력도 가중치**")
 w_s = st.sidebar.slider("안정성", 0, 100, 40)
 w_p = st.sidebar.slider("수익성", 0, 100, 30)
@@ -811,8 +831,6 @@ if not valid_sectors:
     st.stop()
 
 if mode == "단일 업종 상세":
-    default_idx = valid_sectors.index("전기전자") if "전기전자" in valid_sectors else 0
-    sector = st.sidebar.selectbox("업종 선택", valid_sectors, index=default_idx)
     sub_list = listing[listing["업종"] == sector].sort_values("시가총액", ascending=False).head(max_n)
     with guard("단일 업종 분석"):
         run_group(dict(zip(sub_list["코드"], sub_list["이름"])), f"'{sector}' 업종 매력도 순위",
