@@ -582,6 +582,8 @@ def tab_summary(result, focus, sector=None, allow_pick=True):
         name = st.selectbox("요약할 종목 선택", names, index=idx, key="summary_pick")
     else:
         name = focus if focus in names else names[0]
+        if focus not in names:
+            st.info(f"'{focus}'의 재무 데이터가 없어 같은 업종의 다른 종목을 표시합니다.")
     r = result.loc[name]
     rank = result.index.get_loc(name) + 1
     st.subheader(f"📋 {name} — 분석 요약")
@@ -632,11 +634,15 @@ def tab_fundamental(result, sub, label):
             f"- **밸류에이션 {r['밸류에이션']:.1f}** = PER {r['PER']:.1f} · PBR {r['PBR']:.1f} · PSR {r['PSR']:.1f}")
 
 
-def tab_technical(result, focus):
+def tab_technical(result, focus, allow_pick=True):
     names = result.index.tolist()
     st.subheader("주가 · 봉차트 · 지표")
-    idx = names.index(focus) if focus in names else 0
-    pick = st.selectbox("종목 선택", names, index=idx, key="tech")
+    if allow_pick and len(names) > 1:
+        idx = names.index(focus) if focus in names else 0
+        pick = st.selectbox("종목 선택", names, index=idx, key="tech")
+    else:
+        pick = focus if focus in names else names[0]
+        st.caption(f"종목: **{pick}**")
     price = get_price(result.loc[pick, "코드"])
     if price is None:
         st.warning("주가 데이터를 받지 못했습니다. 잠시 후 다시 시도해 주세요.")
@@ -728,7 +734,7 @@ def render_detail(result, sub, label, focus=None, show_summary=False, sector=Non
                 tab_fundamental(result, sub, label)
         with t2:
             with guard("2차 기술적 분석"):
-                tab_technical(result, focus)
+                tab_technical(result, focus, allow_pick=allow_pick)
     else:
         t1, t2 = st.tabs(["📑 1차 · 기본적 분석", "📈 2차 · 기술적 분석"])
         with t1:
@@ -736,7 +742,7 @@ def render_detail(result, sub, label, focus=None, show_summary=False, sector=Non
                 tab_fundamental(result, sub, label)
         with t2:
             with guard("2차 기술적 분석"):
-                tab_technical(result, focus)
+                tab_technical(result, focus, allow_pick=allow_pick)
 
 
 # ---------- 화면 ----------
@@ -815,13 +821,13 @@ if mode == "단일 업종 상세":
 elif mode == "종목 검색":
     names_all = listing.sort_values("시가총액", ascending=False)["이름"].tolist()
     q = st.selectbox("🔎 종목 검색 (이름 입력 시 자동완성)", names_all)
-    rowq = listing[listing["이름"] == q].iloc[0]
-    qcode, qsector = rowq["코드"], rowq["업종"]
-    st.caption(f"선택: **{q}** ({qcode}) · 업종: {qsector}")
-    grp = listing[listing["업종"] == qsector].sort_values("시가총액", ascending=False).head(max_n)
-    stocks = dict(zip(grp["코드"], grp["이름"]))
-    stocks[qcode] = q
     with guard("종목 검색 분석"):
+        rowq = listing[listing["이름"] == q].iloc[0]
+        qcode, qsector = rowq["코드"], rowq["업종"]
+        st.caption(f"선택: **{q}** ({qcode}) · 업종: {qsector}")
+        grp = listing[listing["업종"] == qsector].sort_values("시가총액", ascending=False).head(max_n)
+        stocks = dict(zip(grp["코드"], grp["이름"]))
+        stocks[qcode] = q
         run_group(stocks, f"'{qsector}' 업종 내 분석", focus=q, show_summary=True,
                   sector=qsector, allow_pick=False)
 
