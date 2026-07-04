@@ -575,10 +575,13 @@ def render_news(name):
         st.caption("헤드라인을 불러오지 못했어요. 위 검색 링크로 바로 확인할 수 있어요.")
 
 
-def tab_summary(result, focus, sector=None):
+def tab_summary(result, focus, sector=None, allow_pick=True):
     names = result.index.tolist()
-    idx = names.index(focus) if focus in names else 0
-    name = st.selectbox("요약할 종목 선택", names, index=idx, key="summary_pick")
+    if allow_pick and len(names) > 1:
+        idx = names.index(focus) if focus in names else 0
+        name = st.selectbox("요약할 종목 선택", names, index=idx, key="summary_pick")
+    else:
+        name = focus if focus in names else names[0]
     r = result.loc[name]
     rank = result.index.get_loc(name) + 1
     st.subheader(f"📋 {name} — 분석 요약")
@@ -714,12 +717,12 @@ def tab_technical(result, focus):
         render_reports(pick, result.loc[pick, "코드"])
 
 
-def render_detail(result, sub, label, focus=None, show_summary=False, sector=None):
+def render_detail(result, sub, label, focus=None, show_summary=False, sector=None, allow_pick=True):
     if show_summary:
         t0, t1, t2 = st.tabs(["📋 분석 요약", "📑 1차 · 기본적 분석", "📈 2차 · 기술적 분석"])
         with t0:
             with guard("분석 요약"):
-                tab_summary(result, focus or result.index[0], sector=sector)
+                tab_summary(result, focus or result.index[0], sector=sector, allow_pick=allow_pick)
         with t1:
             with guard("1차 기본적 분석"):
                 tab_fundamental(result, sub, label)
@@ -783,7 +786,7 @@ w_v = st.sidebar.slider("밸류에이션", 0, 100, 30)
 max_n = st.sidebar.slider("분석 종목 수 (업종 내 시총 상위)", 5, 60, 20)
 
 
-def run_group(stocks, label, focus=None, show_summary=False, sector=None):
+def run_group(stocks, label, focus=None, show_summary=False, sector=None, allow_pick=True):
     prog = st.progress(0.0, text="재무 데이터 수집 중...")
     metrics = build_metrics(stocks, int(year), reprt_code, api_key, marcap_map, price_map, prog)
     prog.empty()
@@ -791,7 +794,8 @@ def run_group(stocks, label, focus=None, show_summary=False, sector=None):
         st.error("데이터를 가져오지 못했습니다. 재무 기준(분기)을 바꾸거나 API 키를 확인하세요.")
         st.stop()
     result, sub = score_and_rank(metrics, w_s, w_p, w_v)
-    render_detail(result, sub, label, focus=focus, show_summary=show_summary, sector=sector)
+    render_detail(result, sub, label, focus=focus, show_summary=show_summary,
+                  sector=sector, allow_pick=allow_pick)
 
 
 if not valid_sectors:
@@ -818,7 +822,8 @@ elif mode == "종목 검색":
     stocks = dict(zip(grp["코드"], grp["이름"]))
     stocks[qcode] = q
     with guard("종목 검색 분석"):
-        run_group(stocks, f"'{qsector}' 업종 내 분석", focus=q, show_summary=True, sector=qsector)
+        run_group(stocks, f"'{qsector}' 업종 내 분석", focus=q, show_summary=True,
+                  sector=qsector, allow_pick=False)
 
 else:  # 전체 업종 요약
     k = st.sidebar.slider("업종별 분석 종목 수", 3, 15, 5)
