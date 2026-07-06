@@ -658,6 +658,49 @@ AXIS_DESC = {
 }
 
 
+AXIS_TRAIT = {
+    "안정성": {"high": "재무구조가 매우 탄탄합니다(빚 부담이 적음).",
+               "mid": "재무 안정성은 업종 평균 수준입니다.",
+               "low": "부채 부담 등 재무 안정성이 약한 편입니다."},
+    "수익성": {"high": "업종 내에서 잘 버는, 수익성이 우수한 기업입니다.",
+               "mid": "수익성은 업종 평균 수준입니다.",
+               "low": "수익성이 업종 대비 부진합니다."},
+    "밸류에이션": {"high": "실적·자산 대비 주가가 저렴한(싼) 편입니다.",
+                   "mid": "주가는 업종 평균 수준입니다.",
+                   "low": "실적·자산 대비 주가가 다소 비싼 편입니다."},
+}
+
+
+def _band(score):
+    if pd.isna(score):
+        return "mid"
+    if score >= 60:
+        return "high"
+    if score < 40:
+        return "low"
+    return "mid"
+
+
+def _characterize(bands):
+    s, p, v = bands["안정성"], bands["수익성"], bands["밸류에이션"]
+    highs = [a for a in ("안정성", "수익성", "밸류에이션") if bands[a] == "high"]
+    if s == "high" and p == "high" and v == "high":
+        return "안정성·수익성·밸류에이션 삼박자를 고루 갖춘 **우량주** 성격입니다."
+    if p == "high" and v == "low":
+        return "잘 벌지만 주가는 비싼 **성장·프리미엄형**입니다."
+    if s == "high" and v == "high":
+        return "재무가 탄탄하면서 주가도 부담 없는 **안정·가치형**입니다."
+    if v == "high" and p in ("low", "mid"):
+        return "주가는 저평가된 **가치형**이나, 수익성 개선 여부를 함께 볼 필요가 있습니다."
+    if p == "high":
+        return "수익성이 강점인 **실적형**입니다."
+    if s == "high":
+        return "재무 안정성이 돋보이는 **안정형**입니다."
+    if not highs:
+        return "뚜렷한 강점이 적어 업종 내에서 평범하거나 다소 약한 편입니다."
+    return f"**{highs[0]}**이(가) 상대적 강점입니다."
+
+
 def render_basis(name, r_raw, r_sc, rank, n):
     """선택 종목의 안정성·수익성·밸류에이션 점수 근거를 판단기준과 함께 축별로 설명 + 총평."""
     st.markdown(f"**{name}** 의 점수 근거 — 각 지표를 업종 내에서 표준화(z점수)해 "
@@ -683,17 +726,16 @@ def render_basis(name, r_raw, r_sc, rank, n):
         st.caption(f"→ 위 지표들의 표준화 점수를 평균해 **{axis} {ax_score:.1f}점**으로 종합했습니다.")
 
     scores = {"안정성": r_sc["안정성"], "수익성": r_sc["수익성"], "밸류에이션": r_sc["밸류에이션"]}
-    strong = max(scores, key=lambda k: (scores[k] if pd.notna(scores[k]) else -1))
-    weak = min(scores, key=lambda k: (scores[k] if pd.notna(scores[k]) else 999))
-    st.markdown(
-        f"**📝 총평 —** {name}는 업종 {n}종목 중 매력도 {rank}위입니다. "
-        f"안정성 {scores['안정성']:.0f}점, 수익성 {scores['수익성']:.0f}점, "
-        f"밸류에이션 {scores['밸류에이션']:.0f}점으로 **{strong}**이 가장 강하고 "
-        f"**{weak}**이 가장 약합니다. 점수가 높을수록 그 축에서 업종 내 우위에 있다는 뜻이며, "
-        "부채비율·PER·PBR·PSR은 값이 낮을수록 높은 점수로 환산됩니다.")
-    st.caption("※ 적용 지표 — 안정성: 부채비율·유동비율·자기자본비율 / "
-               "수익성: ROE·ROA·영업이익률·순이익률 / 밸류에이션: PER·PBR·PSR "
-               "(모두 업종 내 표준화 점수의 평균으로 각 축을 산정)")
+    bands = {ax: _band(scores[ax]) for ax in scores}
+    st.markdown(f"**📝 총평 — {name} (업종 {n}종목 중 매력도 {rank}위)**")
+    for axis in ("안정성", "수익성", "밸류에이션"):
+        st.markdown(f"- **{axis} {scores[axis]:.0f}점**({_grade(scores[axis])}): "
+                    f"{AXIS_TRAIT[axis][bands[axis]]}")
+    st.markdown(f"**👉 한눈에:** {_characterize(bands)}")
+    st.caption("점수가 높을수록 그 축에서 업종 내 우위에 있다는 뜻이며, "
+               "부채비율·PER·PBR·PSR은 값이 낮을수록 높은 점수로 환산됩니다. "
+               "적용 지표 — 안정성: 부채비율·유동비율·자기자본비율 / "
+               "수익성: ROE·ROA·영업이익률·순이익률 / 밸류에이션: PER·PBR·PSR")
 
 
 def tab_summary(result, focus, sector=None, allow_pick=True):
@@ -785,12 +827,31 @@ def tab_summary(result, focus, sector=None, allow_pick=True):
         verdict = "➖ 주가·실적 모두 대체로 업종 평균 수준입니다."
 
     opm_txt = f"{opm_ann:.1f}% ({opm_year}년 연간)" if opm_ann is not None else "자료 없음"
-    st.markdown(
-        f"- **밸류에이션:** {val_state} "
-        f"(PER {q(r['PER'])} vs 평균 {q(per_a)}, PBR {q(r['PBR'])} vs 평균 {q(pbr_a)})\n"
-        f"- **수익성:** {q_state} "
-        f"(ROE {q(r['ROE'],'%')} vs 평균 {q(roe_a,'%')}, 영업이익률 {opm_txt} · 업종평균 {q(opm_a,'%')})\n\n"
-        f"**종합:** {verdict}")
+
+    def jl(v, av):  # 낮을수록 유리
+        if pd.isna(v) or pd.isna(av) or av == 0:
+            return "-"
+        return "저렴" if v < av * 0.98 else ("비쌈" if v > av * 1.02 else "평균 수준")
+
+    def jh(v, av):  # 높을수록 유리
+        if pd.isna(v) or pd.isna(av) or av == 0:
+            return "-"
+        return "우수" if v > av * 1.02 else ("부진" if v < av * 0.98 else "평균 수준")
+
+    def fnum(v, suf=""):
+        return f"{v:,.1f}{suf}" if pd.notna(v) else "-"
+
+    tbl = pd.DataFrame(
+        [
+            ["PER (배)", fnum(r["PER"]), fnum(per_a), jl(r["PER"], per_a)],
+            ["PBR (배)", fnum(r["PBR"]), fnum(pbr_a), jl(r["PBR"], pbr_a)],
+            ["ROE (%)", fnum(r["ROE"]), fnum(roe_a), jh(r["ROE"], roe_a)],
+            ["영업이익률 (연간, %)", fnum(opm_ann), fnum(opm_a), jh(opm_ann, opm_a)],
+        ],
+        columns=["지표", "기업", "업종평균", "업종 대비"],
+    ).set_index("지표")
+    st.table(tbl)
+    st.success(f"**종합 판단:** {verdict}")
     st.caption("영업이익률은 분기 변동을 줄이기 위해 '연간(사업보고서)' 기준으로 반영했고, "
                "나머지 지표·주가는 선택한 재무 기준과 실시간 시세 기준입니다. "
                "뉴스·리포트는 오른쪽 '📰 뉴스·이슈' 탭에 있어요. 투자 판단 참고용이며 매매 권유가 아닙니다.")
