@@ -589,6 +589,53 @@ def render_news(name):
         st.caption("헤드라인을 불러오지 못했어요. 위 검색 링크로 바로 확인할 수 있어요.")
 
 
+SCORE_UNIT = {"부채비율": "%", "유동비율": "%", "자기자본비율": "%", "ROE": "%", "ROA": "%",
+              "영업이익률": "%", "순이익률": "%", "PER": "배", "PBR": "배", "PSR": "배"}
+
+
+def _grade(score):
+    if pd.isna(score):
+        return "자료 없음"
+    if score >= 80:
+        return "업종 최상위권"
+    if score >= 60:
+        return "업종 상위권"
+    if score >= 40:
+        return "업종 중간"
+    if score >= 20:
+        return "업종 하위권"
+    return "업종 최하위권"
+
+
+def render_basis(name, r_raw, r_sc, rank, n):
+    """선택 종목의 안정성·수익성·밸류에이션 점수 근거를 축별로 설명하고 총평을 단다."""
+    for axis, inds in [("안정성", AX_STAB), ("수익성", AX_PROF), ("밸류에이션", AX_VAL)]:
+        ax_score = r_sc[axis]
+        st.markdown(f"**{axis} {ax_score:.1f}점** — {_grade(ax_score)}")
+        for ind in inds:
+            raw = r_raw.get(ind, float("nan"))
+            sc = r_sc.get(ind, float("nan"))
+            unit = SCORE_UNIT.get(ind, "")
+            direction = "낮을수록 유리" if ind in LOWER_BETTER else "높을수록 유리"
+            raw_txt = f"{raw:,.1f}{unit}" if pd.notna(raw) else "-"
+            sc_txt = f"{sc:.0f}점" if pd.notna(sc) else "-"
+            st.markdown(f"- {ind} {raw_txt} → 업종 백분위 {sc_txt} ({_grade(sc)}, {direction})")
+    scores = {"안정성": r_sc["안정성"], "수익성": r_sc["수익성"], "밸류에이션": r_sc["밸류에이션"]}
+    strong = max(scores, key=lambda k: (scores[k] if pd.notna(scores[k]) else -1))
+    weak = min(scores, key=lambda k: (scores[k] if pd.notna(scores[k]) else 999))
+    st.markdown(
+        f"**📝 총평 —** {name}는 업종 {n}종목 중 매력도 {rank}위입니다. "
+        f"안정성 {scores['안정성']:.0f}점({_grade(scores['안정성'])}), "
+        f"수익성 {scores['수익성']:.0f}점({_grade(scores['수익성'])}), "
+        f"밸류에이션 {scores['밸류에이션']:.0f}점({_grade(scores['밸류에이션'])})으로, "
+        f"**{strong}**이 상대적으로 가장 강하고 **{weak}**이 가장 약합니다. "
+        "각 점수는 업종 내 같은 지표끼리 비교한 0~100 백분위(100=업종 1위)이며, "
+        "부채비율·PER·PBR·PSR은 낮을수록 높은 점수로 환산됩니다."
+    )
+    st.caption("※ 적용 지표 확인 — 안정성: 부채비율·유동비율·자기자본비율 / "
+               "수익성: ROE·ROA·영업이익률·순이익률 / 밸류에이션: PER·PBR·PSR")
+
+
 def tab_summary(result, focus, sector=None, allow_pick=True):
     names = result.index.tolist()
     if allow_pick and len(names) > 1:
@@ -600,18 +647,50 @@ def tab_summary(result, focus, sector=None, allow_pick=True):
             st.info(f"'{focus}'의 재무 데이터가 없어 같은 업종의 다른 종목을 표시합니다.")
     r = result.loc[name]
     rank = result.index.get_loc(name) + 1
+
     st.subheader(f"📋 {name} — 분석 요약")
-    st.caption(f"같은 그룹 {len(result)}종목 중 **매력도 {rank}위**")
-    a, b, c, d = st.columns(4)
-    a.metric("매력도", f"{r['매력도']:.1f}")
-    b.metric("안정성", f"{r['안정성']:.1f}")
-    c.metric("수익성", f"{r['수익성']:.1f}")
-    d.metric("밸류에이션", f"{r['밸류에이션']:.1f}")
-    e, f2, g, h = st.columns(4)
-    e.metric("현재가", f"{r['현재가']:,.0f} 원" if pd.notna(r["현재가"]) else "-")
-    f2.metric("PER", f"{r['PER']:.1f}" if pd.notna(r["PER"]) else "-")
-    g.metric("PBR", f"{r['PBR']:.1f}" if pd.notna(r["PBR"]) else "-")
-    h.metric("ROE", f"{r['ROE']:.1f}%" if pd.notna(r["ROE"]) else "-")
+    if pd.notna(r["현재가"]):
+        st.caption(f"현재가 {r['현재가']:,.0f}원")
+
+    tot = (w_s + w_p + w_v) or 1
+    ps, pp, pv = w_s / tot * 100, w_p / tot * 100, w_v / tot * 100
+    st.markdown(f"### 🎯 매력도 {r['매력도']:.1f}  ·  업종 {rank}위 / {len(result)}종목")
+    st.caption("매력도는 아래 세 축(안정성·수익성·밸류에이션) 점수를 가중 평균한 결과입니다.")
+    a, b, c = st.columns(3)
+    a.metric(f"안정성 · 비중 {ps:.0f}%", f"{r['안정성']:.1f}")
+    b.metric(f"수익성 · 비중 {pp:.0f}%", f"{r['수익성']:.1f}")
+    c.metric(f"밸류에이션 · 비중 {pv:.0f}%", f"{r['밸류에이션']:.1f}")
+    st.markdown(
+        f"**산정식:** 안정성 {r['안정성']:.1f}×{ps:.0f}% + 수익성 {r['수익성']:.1f}×{pp:.0f}% "
+        f"+ 밸류에이션 {r['밸류에이션']:.1f}×{pv:.0f}% = **매력도 {r['매력도']:.1f}**")
+
+    st.markdown("#### 📊 핵심 지표 — 기업 vs 업종 평균")
+
+    def cmp(colw, label, val, avg, inverse):
+        if pd.isna(val):
+            colw.metric(label, "-")
+            return
+        avg_txt = f"{avg:.1f}" if pd.notna(avg) else "-"
+        diff = (val - avg) if pd.notna(avg) else 0.0
+        colw.metric(label, f"{val:.1f}", f"업종평균 {avg_txt} ({diff:+.1f})",
+                    delta_color=("inverse" if inverse else "normal"))
+
+    p1, p2, p3 = st.columns(3)
+    cmp(p1, "PER", r["PER"], result["PER"].mean(), inverse=True)
+    cmp(p2, "PBR", r["PBR"], result["PBR"].mean(), inverse=True)
+    cmp(p3, "ROE(%)", r["ROE"], result["ROE"].mean(), inverse=False)
+    st.caption("녹색이 업종 대비 유리 — PER·PBR은 낮을수록, ROE는 높을수록 유리합니다. "
+               "뉴스·이슈는 오른쪽 '📰 뉴스·이슈' 탭에 있어요.")
+
+
+def tab_news(result, focus, sector, allow_pick=True):
+    names = result.index.tolist()
+    name = focus if focus in names else names[0]
+    if allow_pick and len(names) > 1:
+        idx = names.index(name)
+        name = st.selectbox("종목 선택", names, index=idx, key="news_pick")
+    else:
+        st.caption(f"종목: **{name}**")
     st.markdown(f"#### 📰 '{name}' 기업 뉴스·이슈")
     render_news(name)
     if sector:
@@ -634,18 +713,13 @@ def tab_fundamental(result, sub, label):
     fmt["현재가"] = "{:,.0f}"
     fmt["시총(억)"] = "{:,.0f}"
     st.dataframe(result[DETAIL_COLS].style.format(fmt), use_container_width=True)
-    with st.expander("🔍 점수 산정 근거 — 증권사 표준 지표 점수"):
-        st.caption("안정성=부채비율·유동비율·자기자본비율 / 수익성=ROE·ROA·영업이익률·순이익률 / "
-                   "밸류에이션=PER·PBR·PSR. 각 칸은 그룹 내 0~100 백분위(100=1등).")
+    with st.expander("🔍 점수 산정 근거 — 업종 내 상대 평가"):
+        st.caption("각 지표를 업종 내에서 0~100 백분위로 환산해 안정성·수익성·밸류에이션 3축으로 묶습니다.")
         order = ["안정성"] + AX_STAB + ["수익성"] + AX_PROF + ["밸류에이션"] + AX_VAL
         st.dataframe(sub[order].style.format("{:,.1f}"), use_container_width=True)
-        pick2 = st.selectbox("종목별로 자세히 보기", result.index.tolist(), key="breakdown")
-        r = sub.loc[pick2]
-        st.markdown(
-            f"**{pick2}** 점수 근거\n\n"
-            f"- **안정성 {r['안정성']:.1f}** = 부채비율 {r['부채비율']:.1f} · 유동비율 {r['유동비율']:.1f} · 자기자본비율 {r['자기자본비율']:.1f}\n"
-            f"- **수익성 {r['수익성']:.1f}** = ROE {r['ROE']:.1f} · ROA {r['ROA']:.1f} · 영업이익률 {r['영업이익률']:.1f} · 순이익률 {r['순이익률']:.1f}\n"
-            f"- **밸류에이션 {r['밸류에이션']:.1f}** = PER {r['PER']:.1f} · PBR {r['PBR']:.1f} · PSR {r['PSR']:.1f}")
+        pick2 = st.selectbox("종목별로 근거 자세히 보기", result.index.tolist(), key="breakdown")
+        rank2 = result.index.get_loc(pick2) + 1
+        render_basis(pick2, result.loc[pick2], sub.loc[pick2], rank2, len(result))
 
 
 def tab_technical(result, focus, allow_pick=True):
@@ -739,7 +813,8 @@ def tab_technical(result, focus, allow_pick=True):
 
 def render_detail(result, sub, label, focus=None, show_summary=False, sector=None, allow_pick=True):
     if show_summary:
-        t0, t1, t2 = st.tabs(["📋 분석 요약", "📑 1차 · 기본적 분석", "📈 2차 · 기술적 분석"])
+        t0, t1, t2, t3 = st.tabs(["📋 분석 요약", "📑 1차 · 기본적 분석",
+                                  "📈 2차 · 기술적 분석", "📰 뉴스·이슈"])
         with t0:
             with guard("분석 요약"):
                 tab_summary(result, focus or result.index[0], sector=sector, allow_pick=allow_pick)
@@ -749,14 +824,20 @@ def render_detail(result, sub, label, focus=None, show_summary=False, sector=Non
         with t2:
             with guard("2차 기술적 분석"):
                 tab_technical(result, focus, allow_pick=allow_pick)
+        with t3:
+            with guard("뉴스·이슈"):
+                tab_news(result, focus or result.index[0], sector, allow_pick=allow_pick)
     else:
-        t1, t2 = st.tabs(["📑 1차 · 기본적 분석", "📈 2차 · 기술적 분석"])
+        t1, t2, t3 = st.tabs(["📑 1차 · 기본적 분석", "📈 2차 · 기술적 분석", "📰 뉴스·이슈"])
         with t1:
             with guard("1차 기본적 분석"):
                 tab_fundamental(result, sub, label)
         with t2:
             with guard("2차 기술적 분석"):
                 tab_technical(result, focus, allow_pick=allow_pick)
+        with t3:
+            with guard("뉴스·이슈"):
+                tab_news(result, focus or result.index[0], sector, allow_pick=allow_pick)
 
 
 # ---------- 화면 ----------
