@@ -7,6 +7,7 @@ app.py — KOSPI 종목 분석 애플리케이션 (Streamlit)
 import os
 import re
 import io
+import math
 import datetime
 import urllib.parse
 import xml.etree.ElementTree as ET
@@ -271,6 +272,17 @@ def get_price(code, days=2000):
 
 
 # ---------- 분석 ----------
+@st.cache_data(show_spinner=False)
+def annual_op_margin(code, api_key):
+    """가장 최근 '연간(사업보고서)' 영업이익률(%)과 그 연도. 분기 변동을 배제한 안정적 수치."""
+    this_year = datetime.date.today().year
+    for y in (this_year - 1, this_year - 2, this_year - 3):
+        f = get_financials(code, y, "11011", api_key)
+        if f and pd.notna(f.get("영업이익")) and pd.notna(f.get("매출액")) and f["매출액"]:
+            return f["영업이익"] / f["매출액"] * 100, y
+    return None, None
+
+
 def build_metrics(stocks, year, reprt_code, api_key, marcap_map, price_map, progress=None):
     rows = []
     items = list(stocks.items())
@@ -303,12 +315,32 @@ def build_metrics(stocks, year, reprt_code, api_key, marcap_map, price_map, prog
     return pd.DataFrame(rows).set_index("이름")
 
 
+def _phi(z):
+    """표준정규 누적분포(0~1). z가 클수록 1에 가까움."""
+    return 0.5 * (1 + math.erf(z / math.sqrt(2)))
+
+
+def zscore_pct(series, reverse=False):
+    """업종 내 표준화(z) 후 정규 CDF로 0~100 환산. 값의 크기 차이까지 반영.
+    - winsorize(±3σ)로 이상치 왜곡 방지
+    - reverse=True 는 낮을수록 유리한 지표(부채비율·PER·PBR·PSR)"""
+    s = pd.to_numeric(series, errors="coerce")
+    mu = s.mean()
+    sd = s.std(ddof=0)
+    if pd.isna(sd) or sd == 0:
+        return pd.Series([50.0 if pd.notna(v) else float("nan") for v in s], index=s.index)
+    z = ((s - mu) / sd).clip(-3, 3)
+    if reverse:
+        z = -z
+    return z.apply(lambda v: round(_phi(v) * 100, 1) if pd.notna(v) else float("nan"))
+
+
 def score_and_rank(metrics, w_s, w_p, w_v):
     sc = pd.DataFrame(index=metrics.index)
     for c in HIGHER_BETTER:
-        sc[c] = (metrics[c].rank(pct=True) * 100).round(1)
+        sc[c] = zscore_pct(metrics[c], reverse=False)
     for c in LOWER_BETTER:
-        sc[c] = (metrics[c].rank(pct=True, ascending=False) * 100).round(1)
+        sc[c] = zscore_pct(metrics[c], reverse=True)
     안정성 = sc[AX_STAB].mean(axis=1)
     수익성 = sc[AX_PROF].mean(axis=1)
     밸류 = sc[AX_VAL].mean(axis=1)
@@ -607,33 +639,61 @@ def _grade(score):
     return "업종 최하위권"
 
 
+IND_DESC = {
+    "부채비율": "자기자본 대비 총부채. 낮을수록 빚 부담이 적어 재무가 튼튼",
+    "유동비율": "유동부채 대비 유동자산. 높을수록 단기 지급능력이 좋음",
+    "자기자본비율": "총자산 중 자기자본 비중. 높을수록 자본이 자산을 탄탄히 받침",
+    "ROE": "자기자본이익률. 주주 자본으로 낸 이익률, 높을수록 수익성 우수",
+    "ROA": "총자산이익률. 자산을 얼마나 효율적으로 이익화했는지, 높을수록 우수",
+    "영업이익률": "매출 대비 영업이익. 본업의 수익성, 높을수록 우수",
+    "순이익률": "매출 대비 순이익. 최종적으로 남는 이익률, 높을수록 우수",
+    "PER": "주가 ÷ 주당순이익. 낮을수록 이익 대비 주가가 저렴",
+    "PBR": "주가 ÷ 주당순자산. 낮을수록 자산 대비 주가가 저렴",
+    "PSR": "주가 ÷ 주당매출. 낮을수록 매출 대비 주가가 저렴",
+}
+AXIS_DESC = {
+    "안정성": "빚 부담과 지급능력 등 '재무가 얼마나 튼튼한가'",
+    "수익성": "자본·자산·매출 대비 '얼마나 잘 버는가'",
+    "밸류에이션": "실적·자산 대비 '주가가 싼가 비싼가'",
+}
+
+
 def render_basis(name, r_raw, r_sc, rank, n):
-    """선택 종목의 안정성·수익성·밸류에이션 점수 근거를 축별로 설명하고 총평을 단다."""
+    """선택 종목의 안정성·수익성·밸류에이션 점수 근거를 판단기준과 함께 축별로 설명 + 총평."""
+    st.markdown(f"**{name}** 의 점수 근거 — 각 지표를 업종 내에서 표준화(z점수)해 "
+                "0~100으로 환산하고, 축별로 종합합니다. (같은 지표끼리 비교, 100=업종 최상위)")
     for axis, inds in [("안정성", AX_STAB), ("수익성", AX_PROF), ("밸류에이션", AX_VAL)]:
         ax_score = r_sc[axis]
-        st.markdown(f"**{axis} {ax_score:.1f}점** — {_grade(ax_score)}")
+        st.markdown(f"##### {axis} {ax_score:.1f}점 — {_grade(ax_score)}")
+        st.caption(f"{axis}은(는) {AXIS_DESC[axis]}를 봅니다.")
         for ind in inds:
-            raw = r_raw.get(ind, float("nan"))
-            sc = r_sc.get(ind, float("nan"))
+            raw, sc = r_raw.get(ind, float("nan")), r_sc.get(ind, float("nan"))
             unit = SCORE_UNIT.get(ind, "")
-            direction = "낮을수록 유리" if ind in LOWER_BETTER else "높을수록 유리"
+            better = "낮을수록 유리" if ind in LOWER_BETTER else "높을수록 유리"
             raw_txt = f"{raw:,.1f}{unit}" if pd.notna(raw) else "-"
             sc_txt = f"{sc:.0f}점" if pd.notna(sc) else "-"
-            st.markdown(f"- {ind} {raw_txt} → 업종 백분위 {sc_txt} ({_grade(sc)}, {direction})")
+            if pd.notna(sc):
+                contrib = (f"{axis} 점수를 끌어올림" if sc >= 60 else
+                           f"{axis} 점수를 끌어내림" if sc <= 40 else f"{axis}에 중립적")
+            else:
+                contrib = "자료 없음"
+            st.markdown(
+                f"- **{ind} {raw_txt}** — {IND_DESC[ind]}({better}). "
+                f"업종 내 위치 **{sc_txt}**({_grade(sc)}) → *{contrib}*")
+        st.caption(f"→ 위 지표들의 표준화 점수를 평균해 **{axis} {ax_score:.1f}점**으로 종합했습니다.")
+
     scores = {"안정성": r_sc["안정성"], "수익성": r_sc["수익성"], "밸류에이션": r_sc["밸류에이션"]}
     strong = max(scores, key=lambda k: (scores[k] if pd.notna(scores[k]) else -1))
     weak = min(scores, key=lambda k: (scores[k] if pd.notna(scores[k]) else 999))
     st.markdown(
         f"**📝 총평 —** {name}는 업종 {n}종목 중 매력도 {rank}위입니다. "
-        f"안정성 {scores['안정성']:.0f}점({_grade(scores['안정성'])}), "
-        f"수익성 {scores['수익성']:.0f}점({_grade(scores['수익성'])}), "
-        f"밸류에이션 {scores['밸류에이션']:.0f}점({_grade(scores['밸류에이션'])})으로, "
-        f"**{strong}**이 상대적으로 가장 강하고 **{weak}**이 가장 약합니다. "
-        "각 점수는 업종 내 같은 지표끼리 비교한 0~100 백분위(100=업종 1위)이며, "
-        "부채비율·PER·PBR·PSR은 낮을수록 높은 점수로 환산됩니다."
-    )
-    st.caption("※ 적용 지표 확인 — 안정성: 부채비율·유동비율·자기자본비율 / "
-               "수익성: ROE·ROA·영업이익률·순이익률 / 밸류에이션: PER·PBR·PSR")
+        f"안정성 {scores['안정성']:.0f}점, 수익성 {scores['수익성']:.0f}점, "
+        f"밸류에이션 {scores['밸류에이션']:.0f}점으로 **{strong}**이 가장 강하고 "
+        f"**{weak}**이 가장 약합니다. 점수가 높을수록 그 축에서 업종 내 우위에 있다는 뜻이며, "
+        "부채비율·PER·PBR·PSR은 값이 낮을수록 높은 점수로 환산됩니다.")
+    st.caption("※ 적용 지표 — 안정성: 부채비율·유동비율·자기자본비율 / "
+               "수익성: ROE·ROA·영업이익률·순이익률 / 밸류에이션: PER·PBR·PSR "
+               "(모두 업종 내 표준화 점수의 평균으로 각 축을 산정)")
 
 
 def tab_summary(result, focus, sector=None, allow_pick=True):
@@ -648,13 +708,21 @@ def tab_summary(result, focus, sector=None, allow_pick=True):
     r = result.loc[name]
     rank = result.index.get_loc(name) + 1
 
-    st.subheader(f"📋 {name} — 분석 요약")
-    if pd.notna(r["현재가"]):
-        st.caption(f"현재가 {r['현재가']:,.0f}원")
+    def q(v, suf=""):
+        return f"{v:,.1f}{suf}" if pd.notna(v) else "-"
 
+    st.subheader(f"📋 {name} — 분석 요약")
+
+    # 기본 정보 3가지
+    b1, b2, b3 = st.columns(3)
+    b1.metric("현재가", f"{r['현재가']:,.0f}원" if pd.notna(r["현재가"]) else "-")
+    b2.metric("시가총액", f"{r['시총(억)']:,.0f}억원" if pd.notna(r["시총(억)"]) else "-")
+    b3.metric("업종 내 순위", f"{rank}위 / {len(result)}종목")
+
+    # 매력도 = 세 축의 가중 평균 (직관적 표현)
     tot = (w_s + w_p + w_v) or 1
     ps, pp, pv = w_s / tot * 100, w_p / tot * 100, w_v / tot * 100
-    st.markdown(f"### 🎯 매력도 {r['매력도']:.1f}  ·  업종 {rank}위 / {len(result)}종목")
+    st.markdown(f"### 🎯 매력도 {r['매력도']:.1f}")
     st.caption("매력도는 아래 세 축(안정성·수익성·밸류에이션) 점수를 가중 평균한 결과입니다.")
     a, b, c = st.columns(3)
     a.metric(f"안정성 · 비중 {ps:.0f}%", f"{r['안정성']:.1f}")
@@ -664,6 +732,7 @@ def tab_summary(result, focus, sector=None, allow_pick=True):
         f"**산정식:** 안정성 {r['안정성']:.1f}×{ps:.0f}% + 수익성 {r['수익성']:.1f}×{pp:.0f}% "
         f"+ 밸류에이션 {r['밸류에이션']:.1f}×{pv:.0f}% = **매력도 {r['매력도']:.1f}**")
 
+    # 핵심 지표 — 기업 vs 업종 평균
     st.markdown("#### 📊 핵심 지표 — 기업 vs 업종 평균")
 
     def cmp(colw, label, val, avg, inverse):
@@ -675,12 +744,56 @@ def tab_summary(result, focus, sector=None, allow_pick=True):
         colw.metric(label, f"{val:.1f}", f"업종평균 {avg_txt} ({diff:+.1f})",
                     delta_color=("inverse" if inverse else "normal"))
 
+    per_a, pbr_a, roe_a = result["PER"].mean(), result["PBR"].mean(), result["ROE"].mean()
     p1, p2, p3 = st.columns(3)
-    cmp(p1, "PER", r["PER"], result["PER"].mean(), inverse=True)
-    cmp(p2, "PBR", r["PBR"], result["PBR"].mean(), inverse=True)
-    cmp(p3, "ROE(%)", r["ROE"], result["ROE"].mean(), inverse=False)
-    st.caption("녹색이 업종 대비 유리 — PER·PBR은 낮을수록, ROE는 높을수록 유리합니다. "
-               "뉴스·이슈는 오른쪽 '📰 뉴스·이슈' 탭에 있어요.")
+    cmp(p1, "PER", r["PER"], per_a, inverse=True)
+    cmp(p2, "PBR", r["PBR"], pbr_a, inverse=True)
+    cmp(p3, "ROE(%)", r["ROE"], roe_a, inverse=False)
+
+    # 업종 대비 주가 적정성 — 종합 판단
+    st.markdown("#### 🧭 업종 대비 주가 적정성 (종합 판단)")
+    opm_ann, opm_year = annual_op_margin(r["코드"], api_key)
+    opm_a = result["영업이익률"].mean()
+
+    def below(v, av):
+        return pd.notna(v) and pd.notna(av) and v < av
+
+    def above(v, av):
+        return pd.notna(v) and pd.notna(av) and v > av
+
+    cheap = sum([below(r["PER"], per_a), below(r["PBR"], pbr_a)])
+    pricey = sum([above(r["PER"], per_a), above(r["PBR"], pbr_a)])
+    qual = sum([above(r["ROE"], roe_a),
+                (opm_ann is not None and above(opm_ann, opm_a))])
+    qual_low = sum([below(r["ROE"], roe_a),
+                    (opm_ann is not None and below(opm_ann, opm_a))])
+
+    val_state = ("업종 평균보다 저평가" if cheap >= 2 else
+                 "업종 평균보다 고평가" if pricey >= 2 else "업종 평균 수준")
+    q_state = ("업종 대비 수익성 우수" if qual >= 2 else
+               "업종 대비 수익성 부진" if qual_low >= 2 else "업종 평균 수준의 수익성")
+
+    if val_state == "업종 평균보다 저평가" and qual >= 1:
+        verdict = "✅ 실적 대비 저평가 매력이 있어 보입니다."
+    elif val_state == "업종 평균보다 저평가" and qual_low >= 1:
+        verdict = "⚠️ 주가는 싸지만 수익성이 약해 '싼 데는 이유'가 있을 수 있어요."
+    elif val_state == "업종 평균보다 고평가" and qual >= 1:
+        verdict = "➖ 주가는 다소 비싸나 뛰어난 수익성이 프리미엄을 일부 정당화합니다."
+    elif val_state == "업종 평균보다 고평가" and qual_low >= 1:
+        verdict = "⚠️ 수익성 대비 주가가 비싼 편이라 고평가 우려가 있습니다."
+    else:
+        verdict = "➖ 주가·실적 모두 대체로 업종 평균 수준입니다."
+
+    opm_txt = f"{opm_ann:.1f}% ({opm_year}년 연간)" if opm_ann is not None else "자료 없음"
+    st.markdown(
+        f"- **밸류에이션:** {val_state} "
+        f"(PER {q(r['PER'])} vs 평균 {q(per_a)}, PBR {q(r['PBR'])} vs 평균 {q(pbr_a)})\n"
+        f"- **수익성:** {q_state} "
+        f"(ROE {q(r['ROE'],'%')} vs 평균 {q(roe_a,'%')}, 영업이익률 {opm_txt} · 업종평균 {q(opm_a,'%')})\n\n"
+        f"**종합:** {verdict}")
+    st.caption("영업이익률은 분기 변동을 줄이기 위해 '연간(사업보고서)' 기준으로 반영했고, "
+               "나머지 지표·주가는 선택한 재무 기준과 실시간 시세 기준입니다. "
+               "뉴스·리포트는 오른쪽 '📰 뉴스·이슈' 탭에 있어요. 투자 판단 참고용이며 매매 권유가 아닙니다.")
 
 
 def tab_news(result, focus, sector, allow_pick=True):
@@ -693,6 +806,8 @@ def tab_news(result, focus, sector, allow_pick=True):
         st.caption(f"종목: **{name}**")
     st.markdown(f"#### 📰 '{name}' 기업 뉴스·이슈")
     render_news(name)
+    st.markdown(f"#### 📑 '{name}' 증권사 리포트·리서치")
+    render_reports(name, result.loc[name, "코드"])
     if sector:
         st.markdown(f"#### 🏭 '{sector}' 업종 뉴스·이슈")
         render_news(f"{sector} 업종")
@@ -709,12 +824,18 @@ def tab_fundamental(result, sub, label):
     c1.metric("🏆 가장 매력적인 종목", top, f"매력도 {result.loc[top, '매력도']:.1f}")
     c2.markdown("**비교군 (다음 4종목)**\n\n" + "  ·  ".join(result.index[1:5]))
     st.markdown("#### ② 세부 지표표")
-    fmt = {c: "{:,.1f}" for c in DETAIL_COLS}
-    fmt["현재가"] = "{:,.0f}"
-    fmt["시총(억)"] = "{:,.0f}"
-    st.dataframe(result[DETAIL_COLS].style.format(fmt), use_container_width=True)
-    with st.expander("🔍 점수 산정 근거 — 업종 내 상대 평가"):
-        st.caption("각 지표를 업종 내에서 0~100 백분위로 환산해 안정성·수익성·밸류에이션 3축으로 묶습니다.")
+    unit_names = {"현재가": "현재가(원)", "시총(억)": "시총(억원)",
+                  "부채비율": "부채비율(%)", "유동비율": "유동비율(%)", "자기자본비율": "자기자본비율(%)",
+                  "ROE": "ROE(%)", "ROA": "ROA(%)", "영업이익률": "영업이익률(%)",
+                  "순이익률": "순이익률(%)", "PER": "PER(배)", "PBR": "PBR(배)", "PSR": "PSR(배)"}
+    disp = result[DETAIL_COLS].rename(columns=unit_names)
+    fmt = {unit_names[c]: "{:,.1f}" for c in DETAIL_COLS}
+    fmt["현재가(원)"] = "{:,.0f}"
+    fmt["시총(억원)"] = "{:,.0f}"
+    st.dataframe(disp.style.format(fmt), use_container_width=True)
+    with st.expander("🔍 점수 산정 근거 — 업종 내 표준화(z점수) 평가"):
+        st.caption("각 지표를 업종 내에서 표준화(z점수, 값의 크기 차이까지 반영·이상치 ±3σ 보정)해 "
+                   "0~100으로 환산하고, 안정성·수익성·밸류에이션 3축으로 종합합니다.")
         order = ["안정성"] + AX_STAB + ["수익성"] + AX_PROF + ["밸류에이션"] + AX_VAL
         st.dataframe(sub[order].style.format("{:,.1f}"), use_container_width=True)
         pick2 = st.selectbox("종목별로 근거 자세히 보기", result.index.tolist(), key="breakdown")
@@ -805,10 +926,6 @@ def tab_technical(result, focus, allow_pick=True):
             st.metric(f"RSI(14) · {tf}", f"{last['RSI']:.0f}", state)
         st.caption(f"RSI ({tf} 기준 · 70 위 과매수 · 30 아래 과매도)")
         st.line_chart(o[["RSI"]])
-
-    with guard("증권사 리포트"):
-        st.markdown("#### 📑 증권사 리포트·리서치")
-        render_reports(pick, result.loc[pick, "코드"])
 
 
 def render_detail(result, sub, label, focus=None, show_summary=False, sector=None, allow_pick=True):
