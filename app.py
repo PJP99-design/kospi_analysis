@@ -1021,6 +1021,23 @@ def render_detail(result, sub, label, focus=None, show_summary=False, sector=Non
 
 # ---------- 화면 ----------
 st.set_page_config(page_title="KOSPI 종목 분석", layout="wide")
+
+# 섹션 사이 간격을 조금 넓혀 답답함을 줄임
+st.markdown(
+    """
+    <style>
+      [data-testid="stVerticalBlock"] { gap: 0.9rem; }
+      [data-testid="stMetric"] { padding: 0.2rem 0; }
+      h1 { margin-bottom: 0.6rem !important; }
+      h2, h3, h4, h5 { margin-top: 1.1rem !important; margin-bottom: 0.4rem !important; }
+      hr { margin: 1.2rem 0 !important; }
+      [data-testid="stExpander"] { margin-top: 0.4rem; }
+      .stTabs [data-baseweb="tab-panel"] { padding-top: 0.6rem; }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
 st.title("📊 KOSPI 종목 분석")
 
 api_key = read_api_key()
