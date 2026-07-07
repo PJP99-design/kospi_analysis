@@ -759,9 +759,10 @@ def tab_summary(result, focus, sector=None, allow_pick=True):
     b1, b2, b3 = st.columns(3)
     b1.metric("현재가", f"{r['현재가']:,.0f}원" if pd.notna(r["현재가"]) else "-")
     b2.metric("시가총액", f"{r['시총(억)']:,.0f}억원" if pd.notna(r["시총(억)"]) else "-")
-    b3.metric("업종 내 순위", f"{rank}위 / {len(result)}종목")
+    krank = kospi_mcap_rank.get(r["코드"])
+    b3.metric("KOSPI 시총 순위", f"{krank}위 / {kospi_total}" if krank else "-")
 
-    # 매력도 = 세 축의 가중 평균 (직관적 표현)
+    # 매력도 = 세 축의 가중 평균 (업종 내 순위를 함께 표기)
     tot = (w_s + w_p + w_v) or 1
     ps, pp, pv = w_s / tot * 100, w_p / tot * 100, w_v / tot * 100
     st.markdown(f"### 🎯 매력도 {r['매력도']:.1f}")
@@ -773,9 +774,10 @@ def tab_summary(result, focus, sector=None, allow_pick=True):
     st.markdown(
         f"**산정식:** 안정성 {r['안정성']:.1f}×{ps:.0f}% + 수익성 {r['수익성']:.1f}×{pp:.0f}% "
         f"+ 밸류에이션 {r['밸류에이션']:.1f}×{pv:.0f}% = **매력도 {r['매력도']:.1f}**")
+    st.markdown(f"**업종 내 순위:** {rank}위 / {len(result)}종목")
 
-    # 핵심 지표 — 기업 vs 업종 평균
-    st.markdown("#### 📊 핵심 지표 — 기업 vs 업종 평균")
+    # 핵심 지표 — 기업 vs 업종 평균 & 주가 적정성
+    st.markdown("#### 📊 핵심 지표 — 기업 vs 업종 평균 & 주가 적정성")
 
     def cmp(colw, label, val, avg, inverse):
         if pd.isna(val):
@@ -792,8 +794,7 @@ def tab_summary(result, focus, sector=None, allow_pick=True):
     cmp(p2, "PBR", r["PBR"], pbr_a, inverse=True)
     cmp(p3, "ROE(%)", r["ROE"], roe_a, inverse=False)
 
-    # 업종 대비 주가 적정성 — 종합 판단
-    st.markdown("#### 🧭 업종 대비 주가 적정성 (종합 판단)")
+    # (업종 대비 주가 적정성 — 표 + 종합 판단)
     opm_ann, opm_year = annual_op_margin(r["코드"], api_key)
     opm_a = result["영업이익률"].mean()
 
@@ -1052,6 +1053,13 @@ price_map = dict(zip(listing["코드"], listing["현재가"])) if listing is not
 valid_sectors = []
 if listing is not None:
     valid_sectors = sorted(s for s in listing["업종"].dropna().unique() if s != "(기타)")
+
+# KOSPI 전체 시가총액 순위 (코드 → 순위)
+kospi_mcap_rank, kospi_total = {}, 0
+if listing is not None:
+    _lr = listing.dropna(subset=["시가총액"]).sort_values("시가총액", ascending=False).reset_index(drop=True)
+    kospi_mcap_rank = {code: i + 1 for i, code in enumerate(_lr["코드"])}
+    kospi_total = len(_lr)
 
 # 업종 선택 — 분석 모드 바로 아래 (단일 업종 상세 모드에서만 표시)
 sector = None
