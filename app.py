@@ -1086,9 +1086,13 @@ if mode == "단일 업종 상세" and valid_sectors:
 
 periods = period_options()
 plabels = list(periods.keys())
-psel = st.sidebar.selectbox("재무 기준 (분기)", plabels, index=0)  # 항상 가장 최근
+# 기본값 = 가장 최근 '연간(사업보고서=4분기)'. 분기는 공시 종목이 적어 느리고 불완전하므로
+# 완전하고 빠른 연간을 기본으로. (분기는 목록에서 수동 선택 가능)
+default_idx = next((i for i, l in enumerate(plabels) if l.endswith("4분기")), 0)
+psel = st.sidebar.selectbox("재무 기준 (분기)", plabels, index=default_idx)
 year, reprt_code = periods[psel]
-st.sidebar.caption("항상 가장 최근 분기가 기본. 최신 분기는 공시된 종목만 반영돼요. 주가는 실시간.")
+st.sidebar.caption("기본은 가장 최근 '연간(사업보고서)' — 모든 기업이 제출해 빠르고 완전해요. "
+                   "분기를 고르면 공시한 종목만 반영되고 조금 느릴 수 있어요. 주가는 실시간.")
 st.sidebar.markdown("**매력도 가중치**")
 w_s = st.sidebar.slider("안정성", 0, 100, 40)
 w_p = st.sidebar.slider("수익성", 0, 100, 30)
