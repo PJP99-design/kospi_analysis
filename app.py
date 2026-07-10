@@ -1051,8 +1051,7 @@ if not api_key:
 
 st.sidebar.header("⚙️ 설정")
 mode = st.sidebar.radio("분석 모드",
-                        ["단일 업종 상세", "전체 업종 요약", "종목 검색",
-                         "주요 시장지표", "🤖 가상 모의투자"])
+                        ["단일 업종 상세", "전체 업종 요약", "종목 검색", "주요 시장지표"])
 
 if mode == "주요 시장지표":
     with guard("주요 시장지표"):
@@ -1098,18 +1097,31 @@ max_n = st.sidebar.slider("분석 종목 수 (업종 내 시총 상위)", 5, 60,
 
 
 def build_metrics_fallback(stocks, y, rc, progress=None, max_tries=5):
-    """선택 분기에 데이터가 없으면 직전 분기(→연간)로 내려가며 데이터가 있는 기준을 찾음.
-    반환: (metrics, 사용한_라벨, (연도, reprt_code)). 모두 실패 시 (빈DF, None, None)."""
+    """대표 종목 몇 개로 '데이터 있는 최신 기준'을 먼저 찾은 뒤, 그 기준으로 한 번만 전체 조회.
+    (매번 빈 최신분기를 전체 스캔하던 낭비를 없애 속도 개선)
+    반환: (metrics, 사용한_라벨, (연도, reprt_code)). 실패 시 (빈DF, None, None)."""
     periods = list(period_options().items())  # 최신→과거
     start = 0
     for i, (_, (yy, rcc)) in enumerate(periods):
         if yy == int(y) and rcc == rc:
             start = i
             break
+    probe = list(stocks.keys())[:3]  # 시총 상위(입력 순서) 대표 3종목
     for lbl, (yy, rcc) in periods[start:start + max_tries]:
-        m = build_metrics(stocks, int(yy), rcc, api_key, marcap_map, price_map, progress)
-        if not m.empty:
-            return m, lbl, (int(yy), rcc)
+        has = False
+        for c in probe:
+            f = get_financials(c, int(yy), rcc, api_key)
+            if f and pd.notna(f.get("매출액")):
+                has = True
+                break
+        if has:
+            m = build_metrics(stocks, int(yy), rcc, api_key, marcap_map, price_map, progress)
+            if not m.empty:
+                return m, lbl, (int(yy), rcc)
+    # 대표 종목으로 못 찾으면 선택 기준으로 마지막 한 번만
+    m = build_metrics(stocks, int(y), rc, api_key, marcap_map, price_map, progress)
+    if not m.empty:
+        return m, psel, (int(y), rc)
     return pd.DataFrame(), None, None
 
 
@@ -1127,90 +1139,6 @@ def run_group(stocks, label, focus=None, show_summary=False, sector=None, allow_
     result, sub = score_and_rank(metrics, w_s, w_p, w_v)
     render_detail(result, sub, label, focus=focus, show_summary=show_summary,
                   sector=sector, allow_pick=allow_pick)
-
-
-def build_portfolio(buy_date, topn, per_amount, progress=None):
-    """업종별 매력도 상위 topn 종목을 종목당 per_amount로 매수(매수일 기준) → 오늘까지 손익."""
-    rows = []
-    sectors = valid_sectors
-    for i, sec in enumerate(sectors):
-        if progress:
-            progress.progress((i + 1) / max(len(sectors), 1), text=f"업종 분석 {i+1}/{len(sectors)}: {sec}")
-        grp = listing[listing["업종"] == sec].sort_values("시가총액", ascending=False).head(max(5, topn))
-        metrics, _, _ = build_metrics_fallback(dict(zip(grp["코드"], grp["이름"])), year, reprt_code)
-        if metrics.empty:
-            continue
-        res, _ = score_and_rank(metrics, w_s, w_p, w_v)
-        for name in list(res.index[:topn]):
-            code = res.loc[name, "코드"]
-            px = get_price(code)
-            if px is None or len(px) == 0:
-                continue
-            bwin = px[px.index <= pd.Timestamp(buy_date)]
-            if len(bwin) == 0:
-                continue
-            buy_p = float(bwin["Close"].iloc[-1])
-            cur_p = float(px["Close"].iloc[-1])
-            if buy_p <= 0:
-                continue
-            val = per_amount * cur_p / buy_p
-            rows.append({
-                "종목": name, "업종": sec, "매력도": res.loc[name, "매력도"],
-                "매수가": buy_p, "현재가": cur_p, "수익률(%)": (cur_p / buy_p - 1) * 100,
-                "평가액(원)": val, "손익(원)": val - per_amount,
-            })
-    return pd.DataFrame(rows)
-
-
-def render_portfolio_report(df, buy_date, topn, per_amount):
-    today = datetime.date.today()
-    if df.empty:
-        st.warning("구성할 종목이 없습니다. 재무 기준(분기)을 바꾸거나 매수일을 조정해 보세요.")
-        return
-    n = len(df)
-    invested = per_amount * n
-    cur_total = df["평가액(원)"].sum()
-    pl_total = cur_total - invested
-    ret_total = (pl_total / invested * 100) if invested else 0.0
-
-    st.markdown("### 📄 가상 모의투자 월간 보고서")
-    st.caption(f"매수일 {buy_date} → 평가일 {today} · 전략: 업종별 매력도 상위 {topn}종목 × "
-               f"{per_amount:,.0f}원")
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("보유 종목", f"{n}개")
-    m2.metric("총 투자금", f"{invested:,.0f}원")
-    m3.metric("현재 평가액", f"{cur_total:,.0f}원")
-    m4.metric("총 손익", f"{pl_total:+,.0f}원", f"{ret_total:+.2f}%")
-
-    disp = df.sort_values("수익률(%)", ascending=False).reset_index(drop=True)
-    show = pd.DataFrame({
-        "종목": disp["종목"], "업종": disp["업종"],
-        "매수가": disp["매수가"].map(lambda v: f"{v:,.0f}원"),
-        "현재가": disp["현재가"].map(lambda v: f"{v:,.0f}원"),
-        "수익률": disp["수익률(%)"].map(lambda v: f"{v:+.2f}%"),
-        "손익": disp["손익(원)"].map(lambda v: f"{v:+,.0f}원"),
-    })
-    st.dataframe(show, use_container_width=True, hide_index=True)
-
-    best, worst = disp.iloc[0], disp.iloc[-1]
-    st.markdown(f"**🏆 베스트:** {best['종목']} ({best['수익률(%)']:+.2f}%)  ·  "
-                f"**🥶 워스트:** {worst['종목']} ({worst['수익률(%)']:+.2f}%)")
-    mood = "수익 구간입니다 📈" if pl_total > 0 else ("손실 구간입니다 📉" if pl_total < 0 else "손익 균형입니다")
-    st.success(f"**총평:** {n}종목에 {invested:,.0f}원을 투자해 현재 평가액 {cur_total:,.0f}원, "
-               f"손익 {pl_total:+,.0f}원({ret_total:+.2f}%)으로 {mood}")
-
-    lines = ["가상 모의투자 월간 보고서",
-             f"매수일 {buy_date} / 평가일 {today}",
-             f"전략: 업종별 매력도 상위 {topn}종목 × {per_amount:,.0f}원",
-             f"총 투자금 {invested:,.0f}원 / 평가액 {cur_total:,.0f}원 / "
-             f"손익 {pl_total:+,.0f}원 ({ret_total:+.2f}%)", ""]
-    for _, row in disp.iterrows():
-        lines.append(f"- {row['종목']}({row['업종']}): 매수 {row['매수가']:,.0f} → 현재 {row['현재가']:,.0f} "
-                     f"= {row['수익률(%)']:+.2f}% ({row['손익(원)']:+,.0f}원)")
-    st.download_button("📥 보고서 텍스트 저장", "\n".join(lines),
-                       file_name=f"모의투자보고서_{today}.txt")
-    st.caption("※ 현재 재무 기준으로 뽑은 상위 종목을 매수일 가격에 샀다고 가정한 시뮬레이션입니다. "
-               "완전 자동 월간 발송(이메일 등)은 별도 스케줄러가 필요해요. 투자 판단 참고용입니다.")
 
 
 if not valid_sectors:
@@ -1237,21 +1165,6 @@ elif mode == "종목 검색":
         stocks[qcode] = q
         run_group(stocks, f"'{qsector}' 업종 내 분석", focus=q, show_summary=True,
                   sector=qsector, allow_pick=False)
-
-elif mode == "🤖 가상 모의투자":
-    st.subheader("🤖 가상 모의투자 — 월간 보고서")
-    today = datetime.date.today()
-    default_buy = (today.replace(day=1) - datetime.timedelta(days=1)).replace(day=1)
-    cc1, cc2 = st.columns(2)
-    buy_date = cc1.date_input("매수 기준일", value=default_buy, max_value=today)
-    topn = cc2.slider("업종별 매수 종목 수(상위)", 1, 3, 3)
-    st.info(f"전략: 업종별 매력도 상위 {topn}종목에 각 100만원씩 매수(매수일 {buy_date}) 후 오늘까지 보유 가정. "
-            "⏳ 전체 업종을 훑어 처음엔 몇 분 걸릴 수 있어요.")
-    with guard("가상 모의투자"):
-        prog = st.progress(0.0, text="포트폴리오 구성 중...")
-        pf = build_portfolio(buy_date, topn, 1_000_000, prog)
-        prog.empty()
-        render_portfolio_report(pf, buy_date, topn, 1_000_000)
 
 else:  # 전체 업종 요약
     k = st.sidebar.slider("업종별 분석 종목 수", 3, 15, 5)
