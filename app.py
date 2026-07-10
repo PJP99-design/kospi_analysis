@@ -14,6 +14,18 @@ import xml.etree.ElementTree as ET
 from contextlib import contextmanager
 import requests
 import pandas as pd
+
+# 모든 HTTP 요청에 기본 타임아웃(초)을 걸어, DART 등 외부 서버가 응답하지 않아도
+# 앱이 '수집 중'에서 무한 대기하지 않게 함.
+_ORIG_REQUEST = requests.Session.request
+
+
+def _request_with_timeout(self, *args, **kwargs):
+    kwargs.setdefault("timeout", 12)
+    return _ORIG_REQUEST(self, *args, **kwargs)
+
+
+requests.Session.request = _request_with_timeout
 import streamlit as st
 import FinanceDataReader as fdr
 import plotly.graph_objects as go
@@ -1100,6 +1112,19 @@ w_v = st.sidebar.slider("밸류에이션", 0, 100, 30)
 max_n = st.sidebar.slider("분석 종목 수 (업종 내 시총 상위)", 5, 60, 20)
 
 
+@st.cache_data(show_spinner=False, ttl=120)
+def dart_status(api_key):
+    """DART OpenAPI 상태 코드를 빠르게 확인(점검/한도/키오류 등). 실패 시 'NET'."""
+    try:
+        today = datetime.date.today().strftime("%Y%m%d")
+        r = requests.get("https://opendart.fss.or.kr/api/list.json",
+                         params={"crtfc_key": api_key, "bgn_de": today,
+                                 "end_de": today, "page_count": 1}, timeout=8)
+        return r.json().get("status", "?")
+    except Exception:
+        return "NET"
+
+
 def build_metrics_fallback(stocks, y, rc, progress=None, max_tries=5):
     """대표 종목 몇 개로 '데이터 있는 최신 기준'을 먼저 찾은 뒤, 그 기준으로 한 번만 전체 조회.
     (매번 빈 최신분기를 전체 스캔하던 낭비를 없애 속도 개선)
@@ -1149,6 +1174,22 @@ if not valid_sectors:
     st.info("업종 정보를 받지 못해 기본 종목군(전기전자)으로 진행합니다.")
     with guard("기본 종목군 분석"):
         run_group(FALLBACK_STOCKS, "전기전자(기본)")
+    st.stop()
+
+# DART(재무 데이터 제공처) 상태 선점검 — 점검/한도/키오류면 무한 대기 대신 즉시 안내
+_ds = dart_status(api_key)
+if _ds not in ("000", "013"):
+    _msg = {
+        "800": "DART(전자공시)가 지금 **시스템 점검 중**이에요.",
+        "020": "DART API의 **일일 요청 한도**를 초과했어요(하루 뒤 초기화).",
+        "010": "DART **인증키가 등록되지 않았어요**.",
+        "011": "**사용할 수 없는 DART 키**예요.",
+        "901": "DART **계정이 폐쇄**됐어요.",
+        "NET": "DART에 **연결되지 않아요**(점검 중이거나 네트워크 문제일 수 있어요).",
+    }.get(_ds, f"DART 응답 오류(status {_ds})")
+    st.warning(f"⚠️ {_msg}\n\n재무 기반 분석(단일·전체 업종·종목 검색)은 **DART가 복구되면** 자동으로 다시 됩니다. "
+               "그동안 **주요 시장지표**(주가·지수·환율 등)는 왼쪽 '분석 모드'에서 계속 이용할 수 있어요.")
+    st.caption("이 문제는 앱이 아니라 DART 서버 쪽 상태예요. 잠시 뒤 새로고침해 보세요.")
     st.stop()
 
 if mode == "단일 업종 상세":
