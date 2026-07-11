@@ -21,7 +21,7 @@ _ORIG_REQUEST = requests.Session.request
 
 
 def _request_with_timeout(self, *args, **kwargs):
-    kwargs.setdefault("timeout", 12)
+    kwargs.setdefault("timeout", 25)
     return _ORIG_REQUEST(self, *args, **kwargs)
 
 
@@ -247,29 +247,55 @@ def get_kospi_listing():
 
 
 @st.cache_data(show_spinner=False)
-def get_financials(code, year, reprt_code, api_key):
+def load_snapshot():
+    """저장소에 커밋해둔 직전 재무 스냅샷(fin_snapshot.csv). DART 장애 시 대체 소스.
+    클라우드는 재시작 시 캐시가 지워지므로, 이 파일이 '직전 데이터' 역할을 함."""
+    path = "fin_snapshot.csv"
+    if not os.path.exists(path):
+        return {}
+    try:
+        df = pd.read_csv(path, dtype={"코드": str})
+    except Exception:
+        return {}
+    fields = ["자산총계", "부채총계", "자본총계", "유동자산", "유동부채",
+              "매출액", "영업이익", "당기순이익"]
+    out = {}
+    for _, r in df.iterrows():
+        code = str(r["코드"]).zfill(6)
+        out[code] = {k: (float(r[k]) if (k in df.columns and pd.notna(r[k])) else float("nan"))
+                     for k in fields}
+    return out
+
+
+@st.cache_data(show_spinner=False)
+def get_financials(code, year, reprt_code, api_key, dart_ok=True):
     os.makedirs(CACHE_DIR, exist_ok=True)
     cache_path = os.path.join(CACHE_DIR, f"finstate_{code}_{year}_{reprt_code}.csv")
+    df = None
     if os.path.exists(cache_path):
-        df = pd.read_csv(cache_path, dtype=str)
-    else:
+        df = pd.read_csv(cache_path, dtype=str)   # 세션 내 저장분 우선
+    elif dart_ok:
         try:
             df = get_dart(api_key).finstate(code, year, reprt_code=reprt_code)
         except Exception:
-            return None
-        if df is None or len(df) == 0:
-            return None
-        df.to_csv(cache_path, index=False, encoding="utf-8-sig")
-    return {
-        "자산총계": pick_amount(df, "BS", ["자산총계"]),
-        "부채총계": pick_amount(df, "BS", ["부채총계"]),
-        "자본총계": pick_amount(df, "BS", ["자본총계"]),
-        "유동자산": pick_amount(df, "BS", ["유동자산"]),
-        "유동부채": pick_amount(df, "BS", ["유동부채"]),
-        "매출액": pick_amount(df, "IS", ["매출액", "수익(매출액)"]),
-        "영업이익": pick_amount(df, "IS", ["영업이익"]),
-        "당기순이익": pick_amount(df, "IS", ["당기순이익", "당기순이익(손실)"]),
-    }
+            df = None
+        if df is not None and len(df):
+            df.to_csv(cache_path, index=False, encoding="utf-8-sig")
+        else:
+            df = None
+    if df is not None and len(df):
+        return {
+            "자산총계": pick_amount(df, "BS", ["자산총계"]),
+            "부채총계": pick_amount(df, "BS", ["부채총계"]),
+            "자본총계": pick_amount(df, "BS", ["자본총계"]),
+            "유동자산": pick_amount(df, "BS", ["유동자산"]),
+            "유동부채": pick_amount(df, "BS", ["유동부채"]),
+            "매출액": pick_amount(df, "IS", ["매출액", "수익(매출액)"]),
+            "영업이익": pick_amount(df, "IS", ["영업이익"]),
+            "당기순이익": pick_amount(df, "IS", ["당기순이익", "당기순이익(손실)"]),
+        }
+    # 최종 폴백: 커밋된 스냅샷(직전 저장분) — DART가 죽어도 마지막 데이터 표시
+    return load_snapshot().get(str(code).zfill(6))
 
 
 @st.cache_data(show_spinner=False)
@@ -285,23 +311,23 @@ def get_price(code, days=2000):
 
 # ---------- 분석 ----------
 @st.cache_data(show_spinner=False)
-def annual_op_margin(code, api_key):
+def annual_op_margin(code, api_key, dart_ok=True):
     """가장 최근 '연간(사업보고서)' 영업이익률(%)과 그 연도. 분기 변동을 배제한 안정적 수치."""
     this_year = datetime.date.today().year
     for y in (this_year - 1, this_year - 2, this_year - 3):
-        f = get_financials(code, y, "11011", api_key)
+        f = get_financials(code, y, "11011", api_key, dart_ok)
         if f and pd.notna(f.get("영업이익")) and pd.notna(f.get("매출액")) and f["매출액"]:
             return f["영업이익"] / f["매출액"] * 100, y
     return None, None
 
 
-def build_metrics(stocks, year, reprt_code, api_key, marcap_map, price_map, progress=None):
+def build_metrics(stocks, year, reprt_code, api_key, marcap_map, price_map, progress=None, dart_ok=True):
     rows = []
     items = list(stocks.items())
     for i, (code, name) in enumerate(items):
         if progress:
             progress.progress((i + 1) / len(items), text=f"재무 수집 {i+1}/{len(items)}: {name}")
-        f = get_financials(code, year, reprt_code, api_key)
+        f = get_financials(code, year, reprt_code, api_key, dart_ok)
         if not f:
             continue
         asset, debt, eq = f["자산총계"], f["부채총계"], f["자본총계"]
@@ -807,7 +833,7 @@ def tab_summary(result, focus, sector=None, allow_pick=True):
     cmp(p3, "ROE(%)", r["ROE"], roe_a, inverse=False)
 
     # (업종 대비 주가 적정성 — 표 + 종합 판단)
-    opm_ann, opm_year = annual_op_margin(r["코드"], api_key)
+    opm_ann, opm_year = annual_op_margin(r["코드"], api_key, globals().get("DART_OK", True))
     opm_a = result["영업이익률"].mean()
 
     def below(v, av):
@@ -1098,13 +1124,10 @@ if mode == "단일 업종 상세" and valid_sectors:
 
 periods = period_options()
 plabels = list(periods.keys())
-# 기본값 = 가장 최근 '연간(사업보고서=4분기)'. 분기는 공시 종목이 적어 느리고 불완전하므로
-# 완전하고 빠른 연간을 기본으로. (분기는 목록에서 수동 선택 가능)
-default_idx = next((i for i, l in enumerate(plabels) if l.endswith("4분기")), 0)
-psel = st.sidebar.selectbox("재무 기준 (분기)", plabels, index=default_idx)
+psel = st.sidebar.selectbox("재무 기준 (분기)", plabels, index=0)  # 항상 가장 최근이 먼저
 year, reprt_code = periods[psel]
-st.sidebar.caption("기본은 가장 최근 '연간(사업보고서)' — 모든 기업이 제출해 빠르고 완전해요. "
-                   "분기를 고르면 공시한 종목만 반영되고 조금 느릴 수 있어요. 주가는 실시간.")
+st.sidebar.caption("가장 최근 기준이 기본. 최신 분기는 공시한 종목만 반영되고, "
+                   "없으면 자동으로 직전(연간)으로 표시돼요. 주가는 실시간.")
 st.sidebar.markdown("**매력도 가중치**")
 w_s = st.sidebar.slider("안정성", 0, 100, 40)
 w_p = st.sidebar.slider("수익성", 0, 100, 30)
@@ -1125,7 +1148,7 @@ def dart_status(api_key):
         return "NET"
 
 
-def build_metrics_fallback(stocks, y, rc, progress=None, max_tries=5):
+def build_metrics_fallback(stocks, y, rc, progress=None, max_tries=5, dart_ok=True):
     """대표 종목 몇 개로 '데이터 있는 최신 기준'을 먼저 찾은 뒤, 그 기준으로 한 번만 전체 조회.
     (매번 빈 최신분기를 전체 스캔하던 낭비를 없애 속도 개선)
     반환: (metrics, 사용한_라벨, (연도, reprt_code)). 실패 시 (빈DF, None, None)."""
@@ -1139,29 +1162,33 @@ def build_metrics_fallback(stocks, y, rc, progress=None, max_tries=5):
     for lbl, (yy, rcc) in periods[start:start + max_tries]:
         has = False
         for c in probe:
-            f = get_financials(c, int(yy), rcc, api_key)
+            f = get_financials(c, int(yy), rcc, api_key, dart_ok)
             if f and pd.notna(f.get("매출액")):
                 has = True
                 break
         if has:
-            m = build_metrics(stocks, int(yy), rcc, api_key, marcap_map, price_map, progress)
+            m = build_metrics(stocks, int(yy), rcc, api_key, marcap_map, price_map, progress, dart_ok)
             if not m.empty:
                 return m, lbl, (int(yy), rcc)
     # 대표 종목으로 못 찾으면 선택 기준으로 마지막 한 번만
-    m = build_metrics(stocks, int(y), rc, api_key, marcap_map, price_map, progress)
+    m = build_metrics(stocks, int(y), rc, api_key, marcap_map, price_map, progress, dart_ok)
     if not m.empty:
         return m, psel, (int(y), rc)
     return pd.DataFrame(), None, None
 
 
-def run_group(stocks, label, focus=None, show_summary=False, sector=None, allow_pick=True):
+def run_group(stocks, label, focus=None, show_summary=False, sector=None, allow_pick=True, dart_ok=True):
     prog = st.progress(0.0, text="재무 데이터 수집 중...")
-    metrics, used_label, _ = build_metrics_fallback(stocks, year, reprt_code, prog)
+    metrics, used_label, _ = build_metrics_fallback(stocks, year, reprt_code, prog, dart_ok=dart_ok)
     prog.empty()
     if metrics.empty:
-        st.warning("최근 여러 분기에서 재무 데이터를 찾지 못했어요. "
-                   "OpenDART API 키가 올바른지, 잠시 후 다시 시도해 보세요. "
-                   "(주가·차트 등 다른 기능은 계속 이용할 수 있어요.)")
+        if not dart_ok:
+            st.warning("DART가 점검 중이고, 저장된(직전) 재무 데이터도 없어서 표시할 게 없어요. "
+                       "DART 복구 후 다시 시도해 주세요. (주가·차트·시장지표는 계속 이용 가능)")
+        else:
+            st.warning("최근 여러 분기에서 재무 데이터를 찾지 못했어요. "
+                       "OpenDART API 키가 올바른지, 잠시 후 다시 시도해 보세요. "
+                       "(주가·차트 등 다른 기능은 계속 이용할 수 있어요.)")
         st.stop()
     if used_label and used_label != psel:
         st.info(f"'{psel}' 재무 데이터가 아직 공시 전이라 **{used_label}** 기준으로 표시합니다.")
@@ -1176,27 +1203,33 @@ if not valid_sectors:
         run_group(FALLBACK_STOCKS, "전기전자(기본)")
     st.stop()
 
-# DART(재무 데이터 제공처) 상태 선점검 — 점검/한도/키오류면 무한 대기 대신 즉시 안내
+# DART(실시간) 우선. 느리거나 막히면 8초 안에 빠르게 실패하고, 스냅샷이 있으면 안전장치로 대체.
 _ds = dart_status(api_key)
-if _ds not in ("000", "013"):
-    _msg = {
-        "800": "DART(전자공시)가 지금 **시스템 점검 중**이에요.",
-        "020": "DART API의 **일일 요청 한도**를 초과했어요(하루 뒤 초기화).",
-        "010": "DART **인증키가 등록되지 않았어요**.",
-        "011": "**사용할 수 없는 DART 키**예요.",
-        "901": "DART **계정이 폐쇄**됐어요.",
-        "NET": "DART에 **연결되지 않아요**(점검 중이거나 네트워크 문제일 수 있어요).",
-    }.get(_ds, f"DART 응답 오류(status {_ds})")
-    st.warning(f"⚠️ {_msg}\n\n재무 기반 분석(단일·전체 업종·종목 검색)은 **DART가 복구되면** 자동으로 다시 됩니다. "
-               "그동안 **주요 시장지표**(주가·지수·환율 등)는 왼쪽 '분석 모드'에서 계속 이용할 수 있어요.")
-    st.caption("이 문제는 앱이 아니라 DART 서버 쪽 상태예요. 잠시 뒤 새로고침해 보세요.")
-    st.stop()
+DART_OK = _ds in ("000", "013")
+snap = load_snapshot()
+_msg = {
+    "800": "DART가 **시스템 점검 중**", "020": "DART **일일 요청 한도 초과**(하루 뒤 초기화)",
+    "010": "DART **인증키 미등록**", "011": "**사용할 수 없는 DART 키**",
+    "901": "DART **계정 폐쇄**", "NET": "DART **응답 지연·연결 실패**(서버에서 접근 지연·차단 가능)",
+}.get(_ds, f"DART 응답 오류(status {_ds})")
+# 진단용: 클라우드가 DART에 실제로 닿는지 사이드바에 표시
+st.sidebar.caption(f"🟢 DART 실시간 연결 정상 (status {_ds})" if DART_OK
+                   else f"🔴 DART 연결 문제 (status {_ds})")
+if not DART_OK:
+    if snap:
+        st.warning(f"⚠️ {_msg}. 지금은 **저장된 스냅샷(직전 재무)** 으로 대체 표시합니다(안전장치). "
+                   "주가·차트·시장지표는 항상 실시간이에요.")
+    else:
+        st.warning(f"⚠️ {_msg}. 재무 데이터를 불러올 수 없어요. 잠시 후 다시 시도해 주세요. "
+                   "(대비책: DART가 되는 PC에서 `build_snapshot.py`로 스냅샷을 만들어 커밋해두면 "
+                   "이런 상황에서도 직전 데이터로 표시됩니다.) 주가·차트·시장지표는 계속 이용 가능해요.")
+        st.stop()
 
 if mode == "단일 업종 상세":
     sub_list = listing[listing["업종"] == sector].sort_values("시가총액", ascending=False).head(max_n)
     with guard("단일 업종 분석"):
         run_group(dict(zip(sub_list["코드"], sub_list["이름"])), f"'{sector}' 업종 매력도 순위",
-                  show_summary=True, sector=sector)
+                  show_summary=True, sector=sector, dart_ok=DART_OK)
 
 elif mode == "종목 검색":
     names_all = listing.sort_values("시가총액", ascending=False)["이름"].tolist()
@@ -1209,7 +1242,7 @@ elif mode == "종목 검색":
         stocks = dict(zip(grp["코드"], grp["이름"]))
         stocks[qcode] = q
         run_group(stocks, f"'{qsector}' 업종 내 분석", focus=q, show_summary=True,
-                  sector=qsector, allow_pick=False)
+                  sector=qsector, allow_pick=False, dart_ok=DART_OK)
 
 else:  # 전체 업종 요약
     k = st.sidebar.slider("업종별 분석 종목 수", 3, 15, 5)
@@ -1219,11 +1252,15 @@ else:  # 전체 업종 요약
                .sort_values("시가총액", ascending=False).groupby("업종").head(k))
         prog = st.progress(0.0, text="재무 데이터 수집 중...")
         metrics, used_label, _ = build_metrics_fallback(
-            dict(zip(uni["코드"], uni["이름"])), year, reprt_code, prog)
+            dict(zip(uni["코드"], uni["이름"])), year, reprt_code, prog, dart_ok=DART_OK)
         prog.empty()
         if metrics.empty:
-            st.warning("최근 여러 분기에서 재무 데이터를 찾지 못했어요. "
-                       "OpenDART API 키를 확인하거나 잠시 후 다시 시도해 보세요.")
+            if not DART_OK:
+                st.warning("DART가 점검 중이고 저장된(직전) 재무 데이터도 없어서 표시할 게 없어요. "
+                           "DART 복구 후 다시 시도해 주세요.")
+            else:
+                st.warning("최근 여러 분기에서 재무 데이터를 찾지 못했어요. "
+                           "OpenDART API 키를 확인하거나 잠시 후 다시 시도해 보세요.")
             st.stop()
         if used_label and used_label != psel:
             st.info(f"'{psel}' 재무 데이터가 아직 공시 전이라 **{used_label}** 기준으로 표시합니다.")
